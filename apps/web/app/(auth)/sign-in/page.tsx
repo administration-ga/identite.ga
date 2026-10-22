@@ -18,7 +18,7 @@ import { cn } from "@repo/ui/lib/utils"
 
 import { authClient } from "@/lib/auth-client"
 import {
-  authorizeFederatedSignIn,
+  authorizeAfterSignIn,
   getProviderRedirect,
   hasAuthorizationRequest,
   resumeFederatedSignIn,
@@ -211,7 +211,9 @@ function SignInPageInner() {
       return
     }
     if (isAuthorizationRequest) {
-      const url = await authorizeFederatedSignIn(
+      // La saisie qui vient de réussir satisfait prompt=login : sans cela, le
+      // fournisseur redemanderait le PIN (double identification).
+      const url = await authorizeAfterSignIn(
         new URLSearchParams(authorizationParams),
         authClient,
       )
