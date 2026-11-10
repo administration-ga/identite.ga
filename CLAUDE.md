@@ -72,3 +72,24 @@ If you genuinely think a convention is harmful, surface it. Don't fork silently.
 "Completed" is wrong if anything was skipped silently.
 "Tests pass" is wrong if any were skipped.
 Default to surfacing uncertainty, not hiding it.
+
+## Design System — craft UI
+
+Les règles de **comportement** d'interface — easing, durées, interruptibilité,
+focus, formulaires, images, i18n, dark mode — vivent dans le vault transverse
+`../Documents_projet/00_Transverse/Design/` — entrée : `00 Index - Design Skills.md`.
+
+- **Reviewer ou corriger une UI existante** → `Web Interface Guidelines - Vercel.md`
+  (100+ règles vérifiables, sortie `file:line`). Couche correction : ce sont des
+  défauts, pas du goût. À passer avant toute discussion esthétique.
+- **Écrire une animation** → `Animations - Standards de craft.md`. Non négociables :
+  `ease-out` (jamais `ease-in`) sur l'UI, < 300 ms, `transform`/`opacity`
+  uniquement, jamais `scale(0)`, `transform-origin` sur le trigger des popovers,
+  `prefers-reduced-motion` honoré. Aucune animation sur une action clavier.
+- **Patterns de composants** (boutons, tooltips, drawers, clip-path, drag) →
+  `Design Engineering - Emil Kowalski.md`.
+- **UI gestuelle uniquement** (sheets, swipe, translucidité) →
+  `Apple Design - 17 principes.md`.
+
+Précédence : ces notes ne parlent ni de palette ni de tokens ; toute charte
+couleur propre à ce dépôt l'emporte.

@@ -41,6 +41,7 @@ import type { DataModel } from "./_generated/dataModel";
 import { query } from "./_generated/server";
 import authConfig from "./auth.config";
 import { pinSignIn } from "./lib/pinSignInPlugin";
+import { userinfoClaimsForScopes, type UserinfoProfile } from "./lib/userinfoClaims";
 import {
   handleSignInTwoFactorGate,
   requiresTwoFactorChallenge,
@@ -265,14 +266,6 @@ export const createAuth = (
       }),
     },
     plugins: [
-      // Réécrit les redirects OAuth/OIDC vers l'origin de l'app appelante
-      // (web, admin, developer, controller, connect). Permet aussi au
-      // crossDomainClient côté navigateur d'enregistrer la session via
-      // localStorage (cookies cross-domain non garantis).
-      crossDomain({
-        siteUrl: resolveSiteUrl(requestOrigin),
-      }),
-
       // Transfert explicite d'une session existante entre deux surfaces IDN
       // (ex. connect.identite.ga -> identite.ga avant un step-up KYC). Le
       // jeton est à usage unique et expire après 3 minutes. Le plugin
@@ -383,7 +376,7 @@ export const createAuth = (
         // réponse /oauth2/userinfo. Sert aussi de filet défensif : si un
         // utilisateur non whitelisté contourne l'UI consent en sandbox, on
         // throw — Better Auth refuse alors l'émission du token.
-        getAdditionalUserInfoClaim: (user, _scopes, client) => {
+        getAdditionalUserInfoClaim: async (user, scopes, client) => {
           const meta = (client.metadata ?? {}) as Record<string, unknown>
           const env = meta.env === "production" ? "production" : "sandbox"
           if (env === "sandbox") {
@@ -408,8 +401,19 @@ export const createAuth = (
               throw new Error("sandbox_access_denied")
             }
           }
-          return { env }
+          // Scopes fournis par le jeton validé, jamais par une query utilisateur.
+          const profile: UserinfoProfile | null = scopes.some((scope) =>
+            scope === "profile" || scope === "idn:civil_status",
+          ) ? await ctx.runQuery(internal.profile.getForUserinfo, { userId: user.id }) : null
+          return { env, ...userinfoClaimsForScopes(scopes, profile) }
         },
+      }),
+
+      // Après oidcProvider : son hook doit lire Set-Cookie pour reprendre une
+      // réauthentification avant que crossDomain le transforme en
+      // Set-Better-Auth-Cookie pour le stockage localStorage du navigateur.
+      crossDomain({
+        siteUrl: resolveSiteUrl(requestOrigin),
       }),
 
       // Émission ID tokens RS256 + JWKS publique (§6.1)
