@@ -363,3 +363,10 @@ Worklets vers le chemin encore attendu par Expo et Reanimated et impose la
 bonne dépendance Gradle. L’assemblage natif et le packaging final ont réussi.
 Le compte de revue a été provisionné après le déploiement web ; le backend
 courant comprend cette fonction interne. Aucun rôle privilégié n’a été attribué.
+
+Publication Android terminée : le lien stable
+`https://site.identite.ga/downloads/identite-android.apk` sert la version 1.1.0 (9).
+Téléchargement intégral vérifié ; SHA-256 identique à l’APK signé local :
+`c2f233d4224e1a3e769fb29ee933c480f524613aea88c22c6e6d08b98caa124e`.
+Les boutons Android et TestFlight sont tous deux présents et leurs href ont
+été vérifiés sur l’accueil public. Les commits restent locaux, sans push Git.
