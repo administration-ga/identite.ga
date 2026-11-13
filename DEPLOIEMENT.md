@@ -312,3 +312,24 @@ données avant de remettre Cloud en service : l'ancien export ne contient pas
 ces écritures. Ne jamais laisser les deux instances accepter des écritures
 simultanément. Les anciens déploiements Vercel et mises à jour Expo sont
 référencés dans les sauvegardes privées pour un retour arrière de configuration.
+
+## Téléchargements mobiles — 13 novembre 2026
+
+- Code enregistré : `bb95eda` ; correction de la cible : `52763ae`.
+- Validation : 508 tests backend, 113 tests mobiles, TypeScript et build web réussis.
+- `mobileApp:getLinks`, publication interne d’APK et route HTTP déployés sur
+  `flexible-panda-248`. `CONVEX_SITE_URL=https://site.identite.ga` vérifié.
+- Android EAS : build `5ff4459a-a426-4dff-b8c1-ee3806eb1905`, version 1.1.0 (5).
+  Un second build local est lancé, sortie prévue `/tmp/identite-ga-production.apk`.
+  Publier le premier APK validé avec `apps/mobile/scripts/publish-apk.sh`.
+- iOS EAS : build `cade235e-15e1-4434-bc40-fd20bebf486f`, version 1.1.0 (43).
+  Soumission programmée `a4575abb-4d65-4f06-9e1e-75a34badfb53`.
+- Groupe externe Apple « Bêta publique » créé :
+  `ffef79de-d53b-4695-b098-ffbd7559f068`. La revue bêta demande un contact et
+  un compte de démonstration ; aucune validation Apple obtenue à ce stade.
+- Une fois le lien public TestFlight activé, définir `IOS_TESTFLIGHT_URL` sur
+  `flexible-panda-248` ; le site lit cette variable via `mobileApp:getLinks`.
+- Le projet Vercel est dans l’équipe `internals1`, ID
+  `team_7Snuhd9IoWdqGsGLBpGvWbDT`. Le connecteur utilise un autre compte et
+  ne voit pas ce projet ; le CLI le voit mais refuse une publication production.
+  La section web n’est donc pas encore en ligne. Aucun push Git effectué.
