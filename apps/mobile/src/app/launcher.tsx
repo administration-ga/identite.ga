@@ -5,6 +5,7 @@ import { Screen } from '@/design/components/screen';
 import { PinLogin } from '@/components/auth/pin-login';
 import { api } from '@/lib/api';
 import { authClient } from '@/lib/auth-client';
+import { pushNavigation } from '@/lib/push-navigation';
 import { confirmWithBiometrics, faceUnlockEnabledFor } from '@/lib/face-unlock';
 import { BIOMETRIC } from '@/lib/biometric-label';
 import { clearLastAccount, getLastAccount, initialsOf, type LastAccount } from '@/lib/last-account';
@@ -39,7 +40,7 @@ export default function Launcher() {
     setError(null);
     setBusy(true);
     if (await confirmWithBiometrics(`Déverrouiller avec ${BIOMETRIC}`)) {
-      router.replace('/(tabs)/home');
+      router.replace(pushNavigation.take() as never);
       return;
     }
     // Annulé ou non reconnu : le PIN reste à l'écran, sans message d'erreur.
@@ -47,13 +48,18 @@ export default function Launcher() {
   }, [router]);
 
   useEffect(() => {
+    let active = true;
     void (async () => {
       const last = await getLastAccount();
+      if (!active) return;
       setAccount(last);
       const enabled = await faceUnlockEnabledFor(last?.email);
+      if (!active) return;
       setBioEnabled(enabled);
       if (enabled) void tryFaceUnlock();
     })();
+    // StrictMode rejoue l'effet : seul l'effet actif doit lancer Face ID.
+    return () => { active = false; };
   }, [tryFaceUnlock]);
 
   async function submitPin(entered: string) {
@@ -66,7 +72,7 @@ export default function Launcher() {
         setBusy(false);
         return;
       }
-      router.replace('/(tabs)/home');
+      router.replace(pushNavigation.take() as never);
     } catch {
       // Session expirée ou profil inexistant : retour à la connexion.
       try { await authClient.signOut(); } catch { /* ignore */ }
@@ -75,6 +81,7 @@ export default function Launcher() {
   }
 
   async function switchAccount() {
+    pushNavigation.clear();
     try { await authClient.signOut(); } catch { /* ignore */ }
     await clearLastAccount();
     router.replace('/(auth)/hub');

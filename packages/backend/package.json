@@ -18,7 +18,7 @@
     "@convex-dev/workpool": "^0.4.7",
     "@google/generative-ai": "^0.24.1",
     "@react-pdf/renderer": "^4.5.1",
-    "convex": "^1.38.0",
+    "convex": "^1.48.0",
     "google-auth-library": "^10.9.0",
     "livekit-server-sdk": "^2.17.0",
     "react": "^19",
@@ -32,7 +32,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/web-push": "^3.6.4",
-    "convex-test": "^0.0.38",
+    "convex-test": "^0.0.65",
     "typescript": "5.9.2",
     "vite": "^7.3.6",
     "vitest": "^3.2.4"

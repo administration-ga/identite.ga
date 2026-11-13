@@ -84,6 +84,29 @@ export const welcome = {
   },
 } as const;
 
+export const mobileApps = {
+  eyebrow: "APPLICATIONS MOBILES",
+  title: "Votre identité numérique sur votre téléphone.",
+  sub: "Installez l'application Identité Numérique pour retrouver votre compte IDN, vos documents et votre iBoîte où que vous soyez.",
+  android: {
+    name: "Android",
+    description:
+      "Téléchargez le fichier APK, ouvrez-le sur votre téléphone et autorisez son installation si Android le demande. Ce lien donne toujours la dernière version.",
+    cta: "Télécharger l'APK",
+    version: "Version",
+    publishedOn: "publiée le",
+    unavailable:
+      "Le téléchargement Android est momentanément indisponible. Réessayez dans quelques instants.",
+  },
+  ios: {
+    name: "iPhone",
+    description:
+      "Installez TestFlight depuis l'App Store, puis rejoignez la bêta publique de l'application Identité Numérique.",
+    cta: "Rejoindre la bêta TestFlight",
+    unavailable: "La bêta publique sur iPhone ouvre bientôt.",
+  },
+} as const;
+
 export const about = {
   meta: {
     title: "À propos",

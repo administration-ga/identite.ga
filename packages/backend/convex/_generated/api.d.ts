@@ -152,6 +152,7 @@ import type * as lib_secureToken from "../lib/secureToken.js";
 import type * as lib_signInMethods from "../lib/signInMethods.js";
 import type * as lib_twoFactorGate from "../lib/twoFactorGate.js";
 import type * as lib_userinfoClaims from "../lib/userinfoClaims.js";
+import type * as mobileApp from "../mobileApp.js";
 import type * as nativePushSubscriptions from "../nativePushSubscriptions.js";
 import type * as notifications from "../notifications.js";
 import type * as oauthAuthorize from "../oauthAuthorize.js";
@@ -351,6 +352,7 @@ declare const fullApi: ApiFromModules<{
   "lib/signInMethods": typeof lib_signInMethods;
   "lib/twoFactorGate": typeof lib_twoFactorGate;
   "lib/userinfoClaims": typeof lib_userinfoClaims;
+  mobileApp: typeof mobileApp;
   nativePushSubscriptions: typeof nativePushSubscriptions;
   notifications: typeof notifications;
   oauthAuthorize: typeof oauthAuthorize;

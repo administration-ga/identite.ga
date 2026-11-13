@@ -10,6 +10,7 @@ import { Screen } from '@/design/components/screen';
 import { ErrorNote, ScreenTitle } from '@/design/components/list';
 import { PinLogin } from '@/components/auth/pin-login';
 import { authClient } from '@/lib/auth-client';
+import { pushNavigation } from '@/lib/push-navigation';
 import { passkeyEnabledFor, passkeyErrorMessage } from '@/lib/passkeys';
 import { markFaceUnlockOffered, shouldOfferFaceUnlock } from '@/lib/face-unlock';
 import { getLastAccount, initialsOf, type LastAccount } from '@/lib/last-account';
@@ -102,7 +103,7 @@ export default function Login() {
       router.replace('/(auth)/signup/bio?next=/(tabs)/home');
       return;
     }
-    router.replace('/(tabs)/home');
+    router.replace(pushNavigation.take() as never);
   }
 
   async function signInWithPin(entered: string) {

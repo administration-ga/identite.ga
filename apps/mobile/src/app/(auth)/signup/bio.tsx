@@ -11,6 +11,7 @@ import { IdnLottie } from '@/design/components/lottie';
 import { Icon } from '@/design/icons';
 import { SignupScreen } from '@/components/auth/signup-screen';
 import { biometricAvailable, confirmWithBiometrics, setFaceUnlockForSession } from '@/lib/face-unlock';
+import { pushNavigation } from '@/lib/push-navigation';
 import { BIOMETRIC, BIOMETRIC_TITLE } from '@/lib/biometric-label';
 
 export default function SignupBio() {
@@ -37,12 +38,12 @@ export default function SignupBio() {
       return;
     }
     await setFaceUnlockForSession(true);
-    router.replace(nextHref);
+    router.replace(params.next ? pushNavigation.take(String(nextHref)) as Href : nextHref);
   }
 
   async function skip() {
     await setFaceUnlockForSession(false);
-    router.replace(nextHref);
+    router.replace(params.next ? pushNavigation.take(String(nextHref)) as Href : nextHref);
   }
 
   const fromLogin = !!params.next;

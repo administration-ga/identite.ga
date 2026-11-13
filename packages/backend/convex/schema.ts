@@ -1641,4 +1641,19 @@ export default defineSchema({
     .index("by_status", ["status", "createdAt"])
     .index("by_email", ["email"])
     .index("by_createdAt", ["createdAt"]),
+
+  /**
+   * APK Android de production hébergés dans le stockage Convex. La route
+   * stable `GET /downloads/identite-android.apk` (convex/http.ts) redirige
+   * toujours vers le plus récent. Publication : convex/mobileApp.ts.
+   */
+  mobileAppBuild: defineTable({
+    storageId: v.id("_storage"),
+    /** Version affichée (`expo.version`, ex. « 1.1.0 »). */
+    version: v.string(),
+    /** Numéro de build (`versionCode` Android, géré par EAS). */
+    buildNumber: v.string(),
+    sizeBytes: v.number(),
+    publishedAt: v.number(),
+  }),
 })

@@ -12,6 +12,7 @@ import {
   websiteJsonLd,
 } from "../../lib/json-ld"
 import { pageMetadata } from "../../lib/seo"
+import { MobileAppsSection } from "./_components/mobile-apps-section"
 import { navActions, welcome } from "./_content/fr"
 
 export const metadata = pageMetadata({
@@ -158,6 +159,8 @@ export default function HomePage() {
           </Card>
         </div>
       </section>
+
+      <MobileAppsSection />
     </>
   )
 }

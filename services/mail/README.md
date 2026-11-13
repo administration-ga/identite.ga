@@ -98,6 +98,51 @@ JMAP. Il est exécuté au stage `data`, utilise une authentification Bearer et
 conserve `tempFailOnError=true` : si Convex est indisponible, l'expéditeur
 reçoit une erreur SMTP temporaire au lieu d'une fausse acceptation.
 
+Le relais doit utiliser l'adresse canonique du backend auto-hébergé :
+
+```dotenv
+CONVEX_INBOUND_URL=https://site.identite.ga/mail/inbound
+```
+
+Après toute migration du backend, vérifier cette variable dans le conteneur
+effectivement démarré, puis vérifier le transfert entrant. Le contrôle
+`/bridge/health` teste uniquement l'accès à Stalwart : un résultat positif ne
+garantit pas que Convex reçoit les messages.
+
+### Incident du 20 octobre 2026
+
+Le relais conservait l'adresse `flexible-panda-248.convex.site` après la
+migration du backend du 10 octobre. Les journaux conservés montrent des erreurs
+HTTP 500 depuis le 10 octobre, suivies d'erreurs du hook MTA de Stalwart. Le DNS,
+le port SMTP public et la reconnaissance de la boîte examinée fonctionnaient.
+
+Le 20 octobre, l'accès SSH a été rétabli en ajoutant la clé publique actuelle du
+Mac pour `berny`, en conservant l'ancienne clé. La configuration cloud-init
+Freebox conserve les deux clés, un ajout idempotent dans `authorized_keys` au
+démarrage et `ssh_deletekeys: false` pour préserver les clés d'hôte.
+La configuration précédente est sauvegardée sur le Mac dans
+`~/.config/identite-ga/freebox-ssh-recovery-2026-10-20.json`, en mode `0600`.
+
+`CONVEX_INBOUND_URL` a été corrigée dans `bridge.env`, puis seul le service
+`bridge` a été recréé. La sauvegarde privée sur la VM est
+`/home/berny/services/mail/bridge.env.before-backend-fix-2026-10-20`.
+Un appel authentifié au hook, avec un destinataire de diagnostic inexistant,
+a traversé le relais et obtenu `200 {"action":"accept"}` sans livrer de mail.
+Des délais de connexion intermittents vers ST Digital subsistent : deux des
+trois contrôles ultérieurs depuis de nouveaux processus Node ont dépassé le
+délai de connexion de 10 secondes ; le troisième a atteint le backend et
+obtenu la réponse attendue à un corps volontairement incomplet. Une capture
+limitée aux métadonnées TCP montre des retransmissions, alors que le ping
+mesuré est stable à environ 131 ms. La cause de ces délais réseau n'est pas
+encore déterminée. Le test positif du hook ne suffit donc pas à garantir la
+fiabilité de la réception, et aucune nouvelle livraison réelle de bout en bout
+n'a été validée pendant ce diagnostic.
+
+L'administration et la page MTA-STS, initialement en erreur 502, ont retrouvé
+un statut HTTP 200 après le redémarrage de la VM, sans modification de Caddy.
+Aucun renvoi de message en échec ni aucune bascule DNS n'a été effectué.
+Les messages définitivement rejetés nécessitent un nouvel envoi autorisé.
+
 ## Sauvegardes
 
 Une sauvegarde de migration est conservée dans

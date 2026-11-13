@@ -9,6 +9,7 @@ import { Screen } from '@/design/components/screen';
 import { ErrorNote, ScreenTitle } from '@/design/components/list';
 import { OtpInput } from '@/design/components/otp-input';
 import { authClient } from '@/lib/auth-client';
+import { pushNavigation } from '@/lib/push-navigation';
 import { setOnboardingDone } from '@/hooks/use-app-state';
 
 /**
@@ -47,7 +48,7 @@ export default function TwoFactorChallenge() {
         return;
       }
       await setOnboardingDone(true);
-      router.replace('/(tabs)/home');
+      router.replace(pushNavigation.take() as never);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Vérification impossible. Réessaie.');
       setCode('');

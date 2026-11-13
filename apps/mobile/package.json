@@ -29,7 +29,7 @@
     "@react-navigation/native": "^7.1.33",
     "@repo/backend": "*",
     "better-auth": "^1.6.10",
-    "convex": "^1.38.0",
+    "convex": "^1.48.0",
     "expo": "~55.0.29",
     "expo-better-auth-passkey": "^1.4.3",
     "expo-blur": "~55.0.17",

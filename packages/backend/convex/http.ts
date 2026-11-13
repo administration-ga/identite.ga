@@ -6,6 +6,7 @@ import { authenticateApiKey } from "./developer/apiKeys"
 import { createAuth } from "./auth"
 import { inbound as inboundMailHandler } from "./iboite/mailHttp"
 import { getPublicJwks } from "./lib/documentSigning"
+import { ANDROID_APK_PATH } from "./mobileApp"
 import { parseDirectoryResolveRequest } from "./partner/resolveRequest"
 import {
   parseAgentActedRequest,
@@ -1563,6 +1564,30 @@ http.route({
     } catch (error) {
       return businessError(error)
     }
+  }),
+})
+
+// GET /downloads/identite-android.apk — lien STABLE vers le dernier APK publié.
+// Une réponse d'action HTTP est plafonnée à 20 Mo : on redirige vers le
+// stockage au lieu de servir le fichier. Publication : convex/mobileApp.ts.
+http.route({
+  path: ANDROID_APK_PATH,
+  method: "GET",
+  handler: httpAction(async (ctx) => {
+    const build = await ctx.runQuery(internal.mobileApp.latest, {})
+    const url = build ? await ctx.storage.getUrl(build.storageId) : null
+    if (!build || !url) {
+      return new Response("Aucune version Android publiée.", { status: 404 })
+    }
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: url,
+        // Le lien doit suivre chaque publication : pas de redirection en cache.
+        "Cache-Control": "no-store",
+        "X-App-Version": `${build.version} (${build.buildNumber})`,
+      },
+    })
   }),
 })
 
