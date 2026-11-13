@@ -349,3 +349,17 @@ référencés dans les sauvegardes privées pour un retour arrière de configura
   App Store Connect ; aucun secret dans Git. Coordonnées reprises de Lamap.
 - Le build Android local requiert Java 17. Utiliser un TMPDIR dédié pour
   éviter les chemins DOM Expo périmés dans le cache Metro d’un ancien build.
+
+### APK final
+
+L’APK local signé 1.1.0, `versionCode=9`, est disponible sur le Mac à
+`/tmp/identite-ga-production.apk`. Signature vérifiée avec apksigner,
+package `ga.idn.mobile`, minSdk 24, targetSdk 36. Les deux adresses canoniques
+sont présentes dans le bundle ; l’ancienne API Cloud n’y figure pas.
+Le build EAS Android initial, resté en file, a été annulé.
+
+Le plugin `apps/mobile/plugins/with-worklets-native-libs.js` copie la sortie
+Worklets vers le chemin encore attendu par Expo et Reanimated et impose la
+bonne dépendance Gradle. L’assemblage natif et le packaging final ont réussi.
+Le compte de revue a été provisionné après le déploiement web ; le backend
+courant comprend cette fonction interne. Aucun rôle privilégié n’a été attribué.
