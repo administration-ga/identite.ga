@@ -41,7 +41,8 @@
       "extends": "production",
       "distribution": "internal",
       "android": {
-        "buildType": "apk"
+        "buildType": "apk",
+        "gradleCommand": ":react-native-worklets:mergeReleaseNativeLibs :app:assembleRelease --no-parallel"
       }
     }
   },
