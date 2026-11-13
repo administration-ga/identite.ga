@@ -333,3 +333,19 @@ référencés dans les sauvegardes privées pour un retour arrière de configura
   `team_7Snuhd9IoWdqGsGLBpGvWbDT`. Le connecteur utilise un autre compte et
   ne voit pas ce projet ; le CLI le voit mais refuse une publication production.
   La section web n’est donc pas encore en ligne. Aucun push Git effectué.
+
+### Publication effective
+
+- Site public déployé via Vercel : `dpl_2spkrYGUcVvEkBtwp8uX3r7LaqbG`,
+  état Ready, section `https://identite.ga/#telecharger` vérifiée dans le navigateur.
+- Lien public iOS : `https://testflight.apple.com/join/c2cVfNp2`, stocké dans
+  `IOS_TESTFLIGHT_URL`. Le bouton du site est vérifié.
+- Build 42 soumis à Beta App Review : **Waiting for Review**. Apple interdit
+  une seconde soumission de la même version avant l’approbation initiale.
+  Le lien existe mais n’accepte pas encore de testeurs avant cette approbation.
+- Compte fictif Apple créé sur autorisation explicite : `apple.review@idn.ga`,
+  citoyen niveau 1 sans rôle administratif. Connexion PIN vérifiée HTTP 200.
+  PIN privé dans `~/.config/identite-ga/apple-review.json` (600), renseigné dans
+  App Store Connect ; aucun secret dans Git. Coordonnées reprises de Lamap.
+- Le build Android local requiert Java 17. Utiliser un TMPDIR dédié pour
+  éviter les chemins DOM Expo périmés dans le cache Metro d’un ancien build.
