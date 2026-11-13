@@ -12,7 +12,7 @@
 #   ex. : scripts/publish-apk.sh ~/Downloads/identite.apk 1.1.0 42
 #
 # Cible : le fichier d'environnement Convex de production
-# (`~/.config/identite-ga/convex-prod.env`, cf. DEPLOIEMENT.md). Pour viser une
+# (`~/.config/identite-ga/convex-downloads-cloud.env`, cf. DEPLOIEMENT.md). Pour viser une
 # autre instance : CONVEX_ENV_FILE=/chemin/vers/fichier.env.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ fi
 APK="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 VERSION="$2"
 BUILD="$3"
-ENV_FILE="${CONVEX_ENV_FILE:-$HOME/.config/identite-ga/convex-prod.env}"
+ENV_FILE="${CONVEX_ENV_FILE:-$HOME/.config/identite-ga/convex-downloads-cloud.env}"
 [ -f "$APK" ] || { echo "APK introuvable : $APK" >&2; exit 1; }
 [ -f "$ENV_FILE" ] || { echo "Fichier d'environnement Convex introuvable : $ENV_FILE" >&2; exit 1; }
 

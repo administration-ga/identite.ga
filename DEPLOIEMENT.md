@@ -1,3 +1,11 @@
+> Mise à jour du 13 novembre 2026 : les DNS `api.identite.ga` et
+> `site.identite.ga` pointent actuellement vers Convex Cloud. Le déploiement
+> actif vérifié est `flexible-panda-248`. Le récit de migration ci-dessous
+> décrit un état historique ; ne pas utiliser la clé auto-hébergée contre
+> ces domaines. Les fonctions de téléchargement mobile ont été déployées
+> sur Cloud. Accès CLI direct privé :
+> `~/.config/identite-ga/convex-downloads-cloud.env`.
+
 # Déploiement identite.ga
 
 État du 10 octobre 2026 : **Convex auto-hébergé sur Dokploy est en service**
