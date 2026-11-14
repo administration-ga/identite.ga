@@ -47,7 +47,7 @@ export function MobileAppBadges({ className = "" }: { className?: string }) {
       )}
       {links.apk && (
         <a
-          href={links.apk}
+          href="/downloads/android"
           aria-label="Télécharger l’application Android (APK)"
           className="inline-flex rounded-lg transition-opacity hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
         >
