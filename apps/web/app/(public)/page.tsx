@@ -12,7 +12,7 @@ import {
   websiteJsonLd,
 } from "../../lib/json-ld"
 import { pageMetadata } from "../../lib/seo"
-import { MobileAppsSection } from "./_components/mobile-apps-section"
+import { MobileAppBadges } from "./_components/mobile-app-badges"
 import { navActions, welcome } from "./_content/fr"
 
 export const metadata = pageMetadata({
@@ -80,6 +80,7 @@ export default function HomePage() {
           >
             <Link href="/sign-in">{welcome.ctaSecondary}</Link>
           </Button>
+          <MobileAppBadges className="mt-2" />
         </div>
       </section>
 
@@ -127,6 +128,7 @@ export default function HomePage() {
                 </Link>
               </Button>
             </div>
+            <MobileAppBadges className="mt-5" />
           </div>
 
           <Card className="rounded-2xl p-5 sm:p-7">
@@ -159,8 +161,6 @@ export default function HomePage() {
           </Card>
         </div>
       </section>
-
-      <MobileAppsSection />
     </>
   )
 }
