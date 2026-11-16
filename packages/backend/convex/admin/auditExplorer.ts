@@ -73,6 +73,11 @@ export const AUDIT_CATEGORIES = {
     "delegated_identity_created",
     "delegated_identity_claimed",
     "delegated_claim_code_failed",
+    "partner_mfa_device_registered",
+    "partner_mfa_device_revoked",
+    "partner_mfa_link_created",
+    "partner_mfa_link_revoked",
+    "partner_mfa_request_decided",
   ],
   admin: ["admin_action", "role_assigned", "role_revoked"],
   duplicates: [

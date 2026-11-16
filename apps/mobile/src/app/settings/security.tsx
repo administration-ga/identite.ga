@@ -18,6 +18,9 @@ import { authClient } from "@/lib/auth-client"
 
 import { deletePasskey, listPasskeys, passkeyErrorMessage, PasskeyUnavailableError, setPasskeyForSession, type Passkey } from "@/lib/passkeys"
 import { biometricAvailable, confirmWithBiometrics, faceUnlockEnabledFor, setFaceUnlockForSession } from "@/lib/face-unlock"
+import { readAuthenticatorState } from "@/lib/authenticator/device"
+import { secureAuthenticatorStorage } from "@/lib/authenticator/secure-storage"
+import { provisionThisDevice } from "@/lib/authenticator/this-device"
 
 function fmtDate(value: string | number | Date): string {
   return new Date(value).toLocaleDateString("fr-FR", {
@@ -228,6 +231,14 @@ export default function SettingsSecurity() {
   const [pkUnavailable, setPkUnavailable] = useState(false)
   const [adding, setAdding] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
+  // Appareil de confiance de ce téléphone : identifiant local et compte (SecureStore).
+  const [localDevice, setLocalDevice] = useState<{ userId: string; installationId: string | null; hasSecret: boolean } | null>(null)
+  const [renewing, setRenewing] = useState(false)
+  const devices = useQuery(api.partnerMfa.devices.myDevices, isAuthenticated ? {} : "skip")
+  const links = useQuery(api.partnerMfa.links.myLinks, isAuthenticated ? {} : "skip")
+  const revokeLink = useMutation(api.partnerMfa.links.revokeLink)
+  const registerDevice = useMutation(api.partnerMfa.devices.registerDevice)
+  const rotateDevice = useMutation(api.partnerMfa.devices.rotateDevice)
 
   const loadPasskeys = React.useCallback(async () => {
     try {
@@ -252,6 +263,61 @@ export default function SettingsSecurity() {
   React.useEffect(() => {
     if (isAuthenticated) void loadPasskeys()
   }, [isAuthenticated, loadPasskeys])
+
+  const loadLocalDevice = React.useCallback(async () => {
+    const session = await authClient.getSession()
+    const userId = session?.data?.user?.id as string | undefined
+    if (!userId) return
+    const state = await readAuthenticatorState(secureAuthenticatorStorage, userId)
+    setLocalDevice({ userId, installationId: state.installationId, hasSecret: state.secret !== null })
+  }, [])
+
+  React.useEffect(() => {
+    if (isAuthenticated) void loadLocalDevice()
+  }, [isAuthenticated, loadLocalDevice])
+
+  async function renewDevice() {
+    if (!localDevice || renewing) return
+    setRenewing(true)
+    try {
+      await provisionThisDevice({
+        userId: localDevice.userId,
+        register: registerDevice,
+        rotate: rotateDevice,
+        force: true,
+      })
+      await loadLocalDevice()
+      Alert.alert("Appareil réenregistré", "Les codes de connexion de ce téléphone ont été renouvelés.")
+    } catch (caught) {
+      Alert.alert(
+        "Réenregistrement impossible",
+        caught instanceof Error ? caught.message : "Réessaie dans un instant.",
+      )
+    } finally {
+      setRenewing(false)
+    }
+  }
+
+  function removeLink(clientId: string, clientName: string) {
+    Alert.alert(
+      "Retirer l’accès ?",
+      `${clientName} ne pourra plus te demander de confirmer tes connexions. Il te demandera une autre méthode de vérification à ta prochaine connexion.`,
+      [
+        { text: "Annuler", style: "cancel" },
+        {
+          text: "Retirer l’accès",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await revokeLink({ clientId })
+            } catch (caught) {
+              Alert.alert("Retrait impossible", caught instanceof Error ? caught.message : "Réessaie plus tard.")
+            }
+          },
+        },
+      ],
+    )
+  }
 
   async function toggleBiometrics(enabled: boolean) {
     if (!enabled) {
@@ -357,6 +423,63 @@ export default function SettingsSecurity() {
             </Pressable>
           }
         />
+      </Card>
+
+      <SectionTitle>Confirmation des connexions</SectionTitle>
+      <Card>
+        <Row
+          icon="smartphone"
+          title="Cet appareil"
+          sub={
+            !localDevice
+              ? "Chargement…"
+              : devices?.some((d) => d.installationId === localDevice.installationId) && localDevice.hasSecret
+                ? "Enregistré : les demandes arrivent sur ce téléphone"
+                : "Non enregistré : réenregistre-le pour recevoir les demandes"
+          }
+          right={
+            <Pressable
+              onPress={() => void renewDevice()}
+              disabled={!localDevice || renewing}
+              accessibilityRole="button"
+              accessibilityLabel="Réenregistrer cet appareil"
+              hitSlop={8}
+            >
+              <Text style={{ fontSize: 13, fontWeight: "600", color: t.greenText }}>{renewing ? "…" : "Réenregistrer"}</Text>
+            </Pressable>
+          }
+        />
+        <Row icon="clock" title="Codes de connexion" sub="Un code qui change toutes les 30 s, même hors réseau" chevron onPress={() => router.push("/settings/connection-codes" as never)} />
+        <Row icon="history" title="Activité de confirmation" sub="Demandes acceptées et refusées" chevron onPress={() => router.push("/settings/confirmation-activity" as never)} />
+      </Card>
+
+      <SectionTitle>Services liés</SectionTitle>
+      <Card>
+        {links === undefined ? (
+          <Row icon="link" title="Chargement…" />
+        ) : links.length === 0 ? (
+          <Row icon="link" title="Aucun service lié" sub="Un service apparaît ici après que tu as confirmé son premier accès." />
+        ) : (
+          links.map((link) => (
+            <Row
+              key={link.clientId}
+              icon="link"
+              tone="green"
+              title={link.clientName}
+              sub={`Connexion et confirmation · lié le ${fmtDate(link.createdAt)}`}
+              right={
+                <Pressable
+                  onPress={() => removeLink(link.clientId, link.clientName)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Retirer l’accès de ${link.clientName}`}
+                  hitSlop={8}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: "600", color: t.redText }}>Retirer l’accès</Text>
+                </Pressable>
+              }
+            />
+          ))
+        )}
       </Card>
 
       <SectionTitle>Clés d’accès</SectionTitle>

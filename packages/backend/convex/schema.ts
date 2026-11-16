@@ -212,6 +212,14 @@ export const AUDIT_ACTIONS = [
   // Inscription abandonnée par le citoyen après un refus : la coquille Better
   // Auth (compte sans profil ni PIN) est supprimée et l'adresse libérée.
   "signup_abandoned",
+  // Confirmation de connexion pour un partenaire (convex/partnerMfa/) : appareil
+  // de l'app enregistré ou retiré, lien partenaire créé ou révoqué, demande
+  // tranchée par le citoyen dans l'app.
+  "partner_mfa_device_registered",
+  "partner_mfa_device_revoked",
+  "partner_mfa_link_created",
+  "partner_mfa_link_revoked",
+  "partner_mfa_request_decided",
 ] as const
 
 export const AUDIT_TARGET_TYPES = [
@@ -1656,4 +1664,81 @@ export default defineSchema({
     sizeBytes: v.number(),
     publishedAt: v.number(),
   }),
+
+  /**
+   * Appareil de confiance enregistré par l'app identite.ga (ADR-0007 §6).
+   * Un appareil = une installation de l'app, avec son propre secret TOTP
+   * (RFC 6238) chiffré au repos (`partnerMfa/secretBox.ts`).
+   */
+  authenticatorDevice: defineTable({
+    userId: v.string(), // id Better Auth
+    installationId: v.string(), // identifiant aléatoire généré par l'app
+    name: v.string(),
+    platform: v.union(v.literal("ios"), v.literal("android")),
+    secret: v.object({ ciphertext: v.string(), iv: v.string() }),
+    /** Dernier pas TOTP accepté : un code déjà utilisé ne passe plus (anti-rejeu). */
+    lastTotpCounter: v.optional(v.number()),
+    createdAt: v.number(),
+    lastSeenAt: v.number(),
+    revokedAt: v.optional(v.number()),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_installationId", ["installationId"]),
+
+  /**
+   * Lien (utilisateur, partenaire) : autorise les demandes `login` / `sensitive`
+   * et la vérification de codes pour ce partenaire. Créé par l'approbation d'une
+   * demande `enroll`, retiré par l'utilisateur ou par le partenaire.
+   * `clientName` / `clientIcon` sont recopiés à la création pour que la liste
+   * « Services liés » s'affiche sans lire le composant Better Auth.
+   */
+  partnerMfaLink: defineTable({
+    userId: v.string(),
+    clientId: v.string(),
+    clientName: v.string(),
+    clientIcon: v.optional(v.string()),
+    createdAt: v.number(),
+    revokedAt: v.optional(v.number()),
+  })
+    .index("by_userId_and_clientId", ["userId", "clientId"])
+    .index("by_userId", ["userId"]),
+
+  /**
+   * Demande de confirmation envoyée à l'app d'un citoyen par un partenaire.
+   * Le nombre à 2 chiffres n'est renvoyé qu'au partenaire ; l'app ne reçoit que
+   * les 3 choix, et c'est le serveur qui compare (`requests.respond`).
+   */
+  partnerMfaRequest: defineTable({
+    userId: v.string(),
+    clientId: v.string(),
+    clientName: v.string(),
+    clientIcon: v.optional(v.string()),
+    kind: v.union(v.literal("enroll"), v.literal("login"), v.literal("sensitive")),
+    actionLabel: v.optional(v.string()),
+    context: v.object({
+      device: v.optional(v.string()),
+      ip: v.optional(v.string()),
+      location: v.optional(v.string()),
+    }),
+    number: v.string(),
+    choices: v.array(v.string()),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("approved"),
+      v.literal("denied"),
+      v.literal("wrong_number"),
+      v.literal("cancelled"),
+      // Stocké seulement quand une décision tardive le constate ; à la lecture,
+      // une demande `pending` échue est présentée comme `expired`.
+      v.literal("expired"),
+    ),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    decidedAt: v.optional(v.number()),
+    deviceInstallationId: v.optional(v.string()),
+  })
+    .index("by_userId_and_status", ["userId", "status"])
+    .index("by_userId", ["userId"])
+    .index("by_clientId_and_userId", ["clientId", "userId"])
+    .index("by_expiresAt", ["expiresAt"]),
 })

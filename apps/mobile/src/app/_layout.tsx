@@ -14,6 +14,7 @@ import { ThemePreferenceProvider, useThemePreference } from "@/design/theme"
 import { authClient } from "@/lib/auth-client"
 import { api } from "@/lib/api"
 import { MobilePushBootstrap } from "@/components/mobile-push-bootstrap"
+import { AuthenticatorDeviceSync } from "@/components/authenticator-device-sync"
 import { registerLiveKitGlobals } from "@/lib/livekit-globals"
 import { IDN_FONTS } from "@/design/text"
 import { RootErrorBoundary } from "@/components/root-error-boundary"
@@ -59,6 +60,7 @@ export default function RootLayout() {
       <ConvexBetterAuthProvider client={convex} authClient={authClient}>
         <ThemePreferenceProvider>
           <PreferenceSync />
+          <AuthenticatorDeviceSync />
           <MobilePushBootstrap />
           <AuthRouteGuard />
             <GestureHandlerRootView style={{ flex: 1 }}>
@@ -78,6 +80,10 @@ export default function RootLayout() {
                     <Stack.Screen name="id-card" />
                     <Stack.Screen
                       name="scanner"
+                      options={{ presentation: "fullScreenModal" }}
+                    />
+                    <Stack.Screen
+                      name="confirm"
                       options={{ presentation: "fullScreenModal" }}
                     />
                     <Stack.Screen name="consent" />

@@ -4,6 +4,11 @@ import { getClient, type Client, type OIDCOptions } from "better-auth/plugins"
 import { z } from "zod"
 
 import { parseConsentScopes } from "./consentGrant"
+import {
+  constantTimeEqual,
+  hashClientSecret,
+  parseClientIdList,
+} from "./partnerClientAuth"
 
 /**
  * Échange direct d'une session IDN contre des jetons OAuth, de serveur à
@@ -44,10 +49,7 @@ const DEFAULT_SCOPES = ["openid", "profile", "email"]
 
 /** Liste blanche des clients autorisés, lue dans l'environnement. */
 export function parseExchangeClientIds(raw: string | undefined): string[] {
-  return (raw ?? "")
-    .split(",")
-    .map((id) => id.trim())
-    .filter(Boolean)
+  return parseClientIdList(raw)
 }
 
 /** Scopes demandés, ou ceux du flux OIDC du partenaire par défaut. */
@@ -62,27 +64,6 @@ export function isCoveredByConsent(
   consented: readonly string[],
 ): boolean {
   return requested.every((scope) => consented.includes(scope))
-}
-
-/**
- * Même format que `defaultClientSecretHasher` de Better Auth et que
- * `hashClientSecret` du portail développeur : base64url(SHA-256) sans padding.
- */
-async function hashClientSecret(secret: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(secret) as BufferSource,
-  )
-  let binary = ""
-  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte)
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  let diff = 0
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
-  return diff === 0
 }
 
 const bodySchema = z.object({

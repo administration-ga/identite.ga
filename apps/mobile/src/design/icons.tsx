@@ -8,7 +8,7 @@ import {
   Package, Palette, Paperclip, PenLine, PhoneOff, Plane, Plus, Printer, QrCode, RefreshCw, Reply, RotateCcw,
   RotateCw, Scale, ScanFace, ScanLine, ScrollText, Search, Send, Settings, Share2, Shield, ShieldCheck, Smartphone,
   Sparkles, Star, SwitchCamera, Tablet, Trash2, Truck, Upload, User, UserPlus, UserRound, Users, Video, VideoOff,
-  Vote, WalletCards, Wifi, X, type LucideIcon,
+  Vote, WalletCards, Wifi, X, Ban, CircleX, History, ShieldAlert, type LucideIcon,
 } from 'lucide-react-native';
 
 /**
@@ -40,6 +40,8 @@ const ICONS = {
   settings: Settings, fingerprint: Fingerprint,
   // iBoîte (maquette Gmail)
   menu: Menu, image: Image, badgeCheck: BadgeCheck,
+  // Confirmation de connexion (maquette double authentification)
+  ban: Ban, circleX: CircleX, history: History, shieldAlert: ShieldAlert,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof ICONS;

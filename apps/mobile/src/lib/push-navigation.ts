@@ -33,6 +33,17 @@ export function createPushNavigation() {
 
 export function pushNotificationPath(url: unknown): string | null {
   if (typeof url !== 'string') return null;
+  // Confirmation de connexion : `/confirm?id=<demande>`. Le `id` y désigne une
+  // demande, pas un message : cette route doit passer avant la règle iBoîte.
+  if (url === '/confirm' || url.startsWith('/confirm?')) {
+    const requestId = /[?&]id=([^&]+)/.exec(url)?.[1];
+    if (!requestId) return null;
+    try {
+      return `/confirm?id=${encodeURIComponent(decodeURIComponent(requestId))}`;
+    } catch {
+      return null;
+    }
+  }
   const messageId = /[?&]id=([^&]+)/.exec(url)?.[1];
   if (messageId) {
     try {

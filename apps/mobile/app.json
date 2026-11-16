@@ -129,7 +129,9 @@
       "expo-image",
       "expo-secure-store",
       "expo-web-browser",
-      "./plugins/with-worklets-native-libs"
+      "./plugins/with-worklets-native-libs",
+      "./plugins/withIosSceneLifecycle",
+      "./plugins/withIosDeploymentTarget"
     ],
     "experiments": {
       "typedRoutes": true,

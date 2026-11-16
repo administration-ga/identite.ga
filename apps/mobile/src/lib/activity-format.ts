@@ -58,6 +58,11 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   duplicate_flag_resolved: "Signalement de doublon traité",
   signup_blocked_duplicate: "Inscription bloquée (identité déjà vérifiée)",
   signup_abandoned: "Inscription abandonnée",
+  partner_mfa_device_registered: "Appareil de confirmation enregistré",
+  partner_mfa_device_revoked: "Appareil de confirmation retiré",
+  partner_mfa_link_created: "Service autorisé à demander ta confirmation",
+  partner_mfa_link_revoked: "Accès d’un service à ta confirmation retiré",
+  partner_mfa_request_decided: "Demande de confirmation traitée",
 };
 
 const SHORT_MONTHS_FR = [

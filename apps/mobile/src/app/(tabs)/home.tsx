@@ -9,12 +9,15 @@ import { IdnFlagBars } from '@/design/mark';
 import { Icon, type IconName } from '@/design/icons';
 import { Screen } from '@/design/components/screen';
 import { IconButton } from '@/design/components/app-bar';
-import { LevelBadge } from '@/design/components/badge';
+import { Badge, LevelBadge } from '@/design/components/badge';
+import { IdnButton } from '@/design/components/idn-button';
+import { ServiceTile } from '@/components/confirmation/service-tile';
 import { Card, IconTile, Row, SectionTitle, type RowTone } from '@/design/components/list';
 import { api } from '@/lib/api';
 import { AUDIT_ACTION_LABELS, formatRelativeDate } from '@/lib/activity-format';
 import { homeTasks } from '@/lib/home-tasks';
 import { initialsOf, setLastAccount } from '@/lib/last-account';
+import { formatAgo } from '@/lib/confirmation';
 
 function profileLabel(type: string | undefined, gender: string | undefined): string {
   const f = gender === 'F';
@@ -57,6 +60,8 @@ export default function Home() {
   const kyc = useQuery(api.kyc.getMyLatest, q);
   const level3 = useQuery(api.level3.getMine, q);
   const deletion = useQuery(api.privacy.getDeletionStatus, q);
+  const pendingConfirmations = useQuery(api.partnerMfa.requests.myPending, q);
+  const pendingConfirmation = pendingConfirmations?.[0];
 
   const pivot = user?.profile?.pivot;
   const { isUpdatePending } = useUpdates();
@@ -111,6 +116,29 @@ export default function Home() {
         </View>
       }
     >
+      {/* Demande de confirmation de connexion en attente : repli si la notification n'arrive pas. */}
+      {pendingConfirmation ? (
+        <Card padded style={{ marginTop: 8, borderColor: t.green, gap: 12 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <ServiceTile name={pendingConfirmation.clientName} icon={pendingConfirmation.clientIcon} size={40} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={{ fontSize: 15, fontWeight: '600', color: t.ink }}>Demande de connexion</Text>
+              <Text numberOfLines={1} style={{ fontSize: 13, color: t.muted }}>
+                {`${pendingConfirmation.clientName} · ${formatAgo(pendingConfirmation.createdAt, Date.now())}`}
+              </Text>
+            </View>
+            <Badge tone="green">En attente</Badge>
+          </View>
+          <IdnButton
+            t={t}
+            full
+            onPress={() => router.push(`/confirm?id=${encodeURIComponent(pendingConfirmation.id)}` as never)}
+          >
+            Répondre
+          </IdnButton>
+        </Card>
+      ) : null}
+
       {/* Résumé d'identité */}
       <View style={{ marginTop: 8, borderRadius: 20, backgroundColor: t.green, padding: 20 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>

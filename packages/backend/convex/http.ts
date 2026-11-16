@@ -7,6 +7,7 @@ import { createAuth } from "./auth"
 import { inbound as inboundMailHandler } from "./iboite/mailHttp"
 import { getPublicJwks } from "./lib/documentSigning"
 import { ANDROID_APK_PATH } from "./mobileApp"
+import { registerPartnerMfaRoutes } from "./partnerMfa/http"
 import { parseDirectoryResolveRequest } from "./partner/resolveRequest"
 import {
   parseAgentActedRequest,
@@ -1590,5 +1591,8 @@ http.route({
     })
   }),
 })
+
+// Confirmation de connexion pour les partenaires (ADR-0007 §6).
+registerPartnerMfaRoutes(http)
 
 export default http

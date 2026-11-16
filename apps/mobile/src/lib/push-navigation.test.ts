@@ -54,6 +54,14 @@ describe('ouverture des notifications après authentification', () => {
 });
 
 describe('pushNotificationPath', () => {
+  it('ouvre une demande de confirmation de connexion sans la confondre avec un mail', () => {
+    expect(pushNotificationPath('/confirm?id=k17abc')).toBe('/confirm?id=k17abc');
+    expect(pushNotificationPath('/confirm?id=k17%20abc')).toBe('/confirm?id=k17%20abc');
+    expect(pushNotificationPath('/confirm')).toBeNull();
+    expect(pushNotificationPath('/confirm?id=')).toBeNull();
+    expect(pushNotificationPath('/confirm?id=%E0%A4%A')).toBeNull();
+  });
+
   it('gère les mails et les autres destinations internes', () => {
     expect(pushNotificationPath('/iboite?id=M%201')).toBe('/iboite/email/M%201');
     expect(pushNotificationPath('/notifications')).toBe('/notifications');
