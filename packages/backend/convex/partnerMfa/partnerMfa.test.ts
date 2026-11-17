@@ -4,6 +4,7 @@ import { convexTest } from "convex-test"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
 import { api, internal } from "../_generated/api"
+import type { Id } from "../_generated/dataModel"
 import schema from "../schema"
 import { REQUEST_TTL_MS } from "./rules"
 import { hotp, timeCounter } from "./totpCore"
@@ -102,6 +103,32 @@ function partnerCreate(
     kind: "enroll",
     context: { device: "Chrome sur Mac", location: "Libreville", ip: "196.1.1.1" },
     ...overrides,
+  })
+}
+
+/**
+ * Insère `count` demandes `login` échues mais restées `pending`, comme celles
+ * qu'un utilisateur laisse passer sans répondre. Même utilisateur que `like`.
+ */
+async function insertStalePending(t: T, like: string, count: number) {
+  await t.run(async (ctx) => {
+    const ref = await ctx.db.get(like as Id<"partnerMfaRequest">)
+    if (!ref) throw new Error("demande de référence introuvable")
+    const past = Date.now() - REQUEST_TTL_MS * 10
+    for (let i = 0; i < count; i++) {
+      await ctx.db.insert("partnerMfaRequest", {
+        userId: ref.userId,
+        clientId: ref.clientId,
+        clientName: ref.clientName,
+        kind: "login",
+        context: {},
+        number: "11",
+        choices: ["11", "22", "33"],
+        status: "pending",
+        createdAt: past,
+        expiresAt: past + REQUEST_TTL_MS,
+      })
+    }
   })
 }
 
@@ -357,6 +384,21 @@ describe("réponses, refus, expiration, annulation", () => {
     ).toEqual({ status: "expired" })
   })
 
+  test("des demandes ignorées par dizaines ne masquent pas la nouvelle demande", async () => {
+    // Une demande ignorée reste `pending` en base (seule une réponse tardive la
+    // passe à `expired`). Après une vingtaine, l'app ne doit pas les lire à la
+    // place de la demande en cours.
+    const t = makeT()
+    const enroll = await linkCitizen(t)
+    await insertStalePending(t, enroll.requestId, 25)
+    const login = await partnerCreate(t, { kind: "login" })
+    if (!login.ok) throw new Error("refusé")
+
+    const pending = await citizen(t).query(api.partnerMfa.requests.myPending, {})
+    expect(pending.map((p) => p.id)).toEqual([login.requestId])
+    expect(pending[0].choices).toContain(login.number)
+  })
+
   test("le partenaire peut annuler une demande en attente, puis plus", async () => {
     const t = makeT()
     await linkCitizen(t)
@@ -530,6 +572,23 @@ describe("révocation des liens", () => {
       ok: false,
       error: "not_linked",
     })
+  })
+
+  test("retirer le service annule la demande en cours, même derrière des dizaines de demandes ignorées", async () => {
+    const t = makeT()
+    const enroll = await linkCitizen(t)
+    await insertStalePending(t, enroll.requestId, 60)
+    const login = await partnerCreate(t, { kind: "login" })
+    if (!login.ok) throw new Error("refusé")
+
+    await citizen(t).mutation(api.partnerMfa.links.revokeLink, { clientId: CLIENT.clientId })
+
+    expect(
+      await t.query(internal.partnerMfa.requests.partnerStatus, {
+        clientId: CLIENT.clientId,
+        requestId: login.requestId,
+      }),
+    ).toMatchObject({ status: "cancelled" })
   })
 
   test("le partenaire retire le lien : le statut le reflète, la demande en attente est annulée", async () => {

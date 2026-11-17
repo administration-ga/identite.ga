@@ -270,6 +270,10 @@ export const myPending = query({
       .withIndex("by_userId_and_status", (q) =>
         q.eq("userId", user.userId).eq("status", "pending"),
       )
+      // Les plus récentes d'abord : une demande ignorée reste `pending` en base
+      // après son échéance. Lues dans l'ordre d'insertion, une vingtaine de
+      // demandes ignorées masqueraient la demande en cours.
+      .order("desc")
       .take(20)
     return rows
       .filter((row) => row.expiresAt > now)

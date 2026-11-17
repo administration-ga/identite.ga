@@ -67,6 +67,9 @@ export async function cancelPendingRequests(
     .withIndex("by_userId_and_status", (q) =>
       q.eq("userId", userId).eq("status", "pending"),
     )
+    // Les plus récentes d'abord : les demandes encore valables sont les
+    // dernières créées, derrière d'éventuelles demandes ignorées et échues.
+    .order("desc")
     .take(50)
   for (const request of pending) {
     if (request.clientId !== clientId) continue
