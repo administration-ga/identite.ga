@@ -169,12 +169,18 @@ export const AUDIT_ACTIONS = [
   "level3_approved",
   "level3_rejected",
   "level3_cancelled",
+  // Rendez-vous annulé par le contrôleur : la demande Niveau 3 reste ouverte
+  // et revient en attente de créneau (≠ `level3_cancelled`, demande close).
+  "level3_appointment_cancelled",
   // OAuth / consentement
   "consent_granted",
   "consent_revoked",
   "oauth_app_created",
   "oauth_app_modified",
   "oauth_app_disabled",
+  // Jetons émis à un partenaire de confiance par échange direct de session
+  // (lib/partnerTokenExchange.ts), sans passer par /oauth2/authorize.
+  "partner_token_exchanged",
   // Sessions
   "session_revoked",
   "session_revoked_global",
@@ -206,6 +212,14 @@ export const AUDIT_ACTIONS = [
   // Inscription abandonnée par le citoyen après un refus : la coquille Better
   // Auth (compte sans profil ni PIN) est supprimée et l'adresse libérée.
   "signup_abandoned",
+  // Confirmation de connexion pour un partenaire (convex/partnerMfa/) : appareil
+  // de l'app enregistré ou retiré, lien partenaire créé ou révoqué, demande
+  // tranchée par le citoyen dans l'app.
+  "partner_mfa_device_registered",
+  "partner_mfa_device_revoked",
+  "partner_mfa_link_created",
+  "partner_mfa_link_revoked",
+  "partner_mfa_request_decided",
 ] as const
 
 export const AUDIT_TARGET_TYPES = [
@@ -348,6 +362,10 @@ export default defineSchema({
      */
     nipKey: v.optional(v.string()),
 
+    // Téléphone normalisé pour les contrôles d'unicité. null = profil traité
+    // sans numéro compatible ; undefined = profil historique à migrer.
+    phoneKey: v.optional(v.union(v.string(), v.null())),
+
     photoStorageRef: v.optional(v.id("_storage")),
     pinHash: v.optional(v.string()), // PBKDF2-SHA256, 600k itérations
     // Renseigné uniquement après validation d'un code envoyé au numéro. Les
@@ -381,7 +399,8 @@ export default defineSchema({
     .index("by_deletionScheduledAt", ["deletionScheduledAt"])
     .index("by_pivot_dob", ["pivot.dateOfBirth"])
     .index("by_pivotKey", ["pivotKey"])
-    .index("by_nipKey", ["nipKey"]),
+    .index("by_nipKey", ["nipKey"])
+    .index("by_phoneKey_and_deletedAt", ["phoneKey", "deletedAt"]),
 
   /**
    * Demande KYC (L2 / L3).
@@ -447,6 +466,15 @@ export default defineSchema({
      * sans le lui dire reviendrait à lui faire approuver le doublon à la main.
      */
     duplicateFlagged: v.optional(v.boolean()),
+
+    /**
+     * Champs lus sur la pièce par l'OCR (nom, prénoms, date et lieu de
+     * naissance, sexe, nationalité, date d'expiration…), comparés par le
+     * contrôleur aux données déclarées. JAMAIS le numéro de pièce, qui ne
+     * vit qu'en empreinte (`documentNumberHash`). Absent tant que le pipeline
+     * KYC ne le renseigne pas : l'écran d'examen le dit au lieu d'inventer.
+     */
+    extractedFields: v.optional(v.record(v.string(), v.string())),
 
     submittedAt: v.optional(v.number()),
     createdAt: v.number(),
@@ -1378,6 +1406,10 @@ export default defineSchema({
     channel: v.optional(v.union(v.literal("sms"), v.literal("admin_code"))),
     codeHash: v.optional(v.string()),
     issuedBy: v.optional(v.string()),
+    // Recette sur le déploiement de dev uniquement : empreinte d'un code posé
+    // par `_dev/pinRecoveryTestCode:arm` à la place du code SMS de Bird.
+    // Ignorée en production (cf. `verifyCode`).
+    testCodeHash: v.optional(v.string()),
     attempts: v.number(),
     resetTokenHash: v.optional(v.string()),
     resetTokenExpiresAt: v.optional(v.number()),
@@ -1617,4 +1649,96 @@ export default defineSchema({
     .index("by_status", ["status", "createdAt"])
     .index("by_email", ["email"])
     .index("by_createdAt", ["createdAt"]),
+
+  /**
+   * APK Android de production hébergés dans le stockage Convex. La route
+   * stable `GET /downloads/identite-android.apk` (convex/http.ts) redirige
+   * toujours vers le plus récent. Publication : convex/mobileApp.ts.
+   */
+  mobileAppBuild: defineTable({
+    storageId: v.id("_storage"),
+    /** Version affichée (`expo.version`, ex. « 1.1.0 »). */
+    version: v.string(),
+    /** Numéro de build (`versionCode` Android, géré par EAS). */
+    buildNumber: v.string(),
+    sizeBytes: v.number(),
+    publishedAt: v.number(),
+  }),
+
+  /**
+   * Appareil de confiance enregistré par l'app identite.ga (ADR-0007 §6).
+   * Un appareil = une installation de l'app, avec son propre secret TOTP
+   * (RFC 6238) chiffré au repos (`partnerMfa/secretBox.ts`).
+   */
+  authenticatorDevice: defineTable({
+    userId: v.string(), // id Better Auth
+    installationId: v.string(), // identifiant aléatoire généré par l'app
+    name: v.string(),
+    platform: v.union(v.literal("ios"), v.literal("android")),
+    secret: v.object({ ciphertext: v.string(), iv: v.string() }),
+    /** Dernier pas TOTP accepté : un code déjà utilisé ne passe plus (anti-rejeu). */
+    lastTotpCounter: v.optional(v.number()),
+    createdAt: v.number(),
+    lastSeenAt: v.number(),
+    revokedAt: v.optional(v.number()),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_installationId", ["installationId"]),
+
+  /**
+   * Lien (utilisateur, partenaire) : autorise les demandes `login` / `sensitive`
+   * et la vérification de codes pour ce partenaire. Créé par l'approbation d'une
+   * demande `enroll`, retiré par l'utilisateur ou par le partenaire.
+   * `clientName` / `clientIcon` sont recopiés à la création pour que la liste
+   * « Services liés » s'affiche sans lire le composant Better Auth.
+   */
+  partnerMfaLink: defineTable({
+    userId: v.string(),
+    clientId: v.string(),
+    clientName: v.string(),
+    clientIcon: v.optional(v.string()),
+    createdAt: v.number(),
+    revokedAt: v.optional(v.number()),
+  })
+    .index("by_userId_and_clientId", ["userId", "clientId"])
+    .index("by_userId", ["userId"]),
+
+  /**
+   * Demande de confirmation envoyée à l'app d'un citoyen par un partenaire.
+   * Le nombre à 2 chiffres n'est renvoyé qu'au partenaire ; l'app ne reçoit que
+   * les 3 choix, et c'est le serveur qui compare (`requests.respond`).
+   */
+  partnerMfaRequest: defineTable({
+    userId: v.string(),
+    clientId: v.string(),
+    clientName: v.string(),
+    clientIcon: v.optional(v.string()),
+    kind: v.union(v.literal("enroll"), v.literal("login"), v.literal("sensitive")),
+    actionLabel: v.optional(v.string()),
+    context: v.object({
+      device: v.optional(v.string()),
+      ip: v.optional(v.string()),
+      location: v.optional(v.string()),
+    }),
+    number: v.string(),
+    choices: v.array(v.string()),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("approved"),
+      v.literal("denied"),
+      v.literal("wrong_number"),
+      v.literal("cancelled"),
+      // Stocké seulement quand une décision tardive le constate ; à la lecture,
+      // une demande `pending` échue est présentée comme `expired`.
+      v.literal("expired"),
+    ),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    decidedAt: v.optional(v.number()),
+    deviceInstallationId: v.optional(v.string()),
+  })
+    .index("by_userId_and_status", ["userId", "status"])
+    .index("by_userId", ["userId"])
+    .index("by_clientId_and_userId", ["clientId", "userId"])
+    .index("by_expiresAt", ["expiresAt"]),
 })

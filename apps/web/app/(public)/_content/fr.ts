@@ -57,7 +57,7 @@ export const welcome = {
     line2: "une identité numérique",
     line3: "et un portefeuille souverain.",
   },
-  sub: "Authentifiez-vous une fois, accédez aux services administratifs raccordés. Votre vérification d'identité est traitée sur une infrastructure maîtrisée : aucune image, aucun gabarit biométrique n'est transmis à un tiers.",
+  sub: "Authentifiez-vous une fois, accédez aux services administratifs raccordés.",
   ctaPrimary: "Créer un compte IDN",
   ctaSecondary: "Se connecter",
   loa: {
@@ -82,6 +82,11 @@ export const welcome = {
       },
     ] as const,
   },
+} as const;
+
+export const mobileApps = {
+  iosUrl: "https://testflight.apple.com/join/c2cVfNp2",
+  androidUrl: "https://site.identite.ga/downloads/identite-android.apk",
 } as const;
 
 export const about = {

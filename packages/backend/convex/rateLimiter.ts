@@ -41,6 +41,19 @@ export const rateLimiter = new RateLimiter(components.rateLimiter, {
     capacity: 60,
     shards: 4,
   },
+  // Confirmation de connexion (API partenaire) : création de demandes par
+  // partenaire et par citoyen, vérification de codes TOTP par partenaire et citoyen.
+  partnerMfaRequestCreate: {
+    kind: "token bucket",
+    rate: 6,
+    period: MINUTE,
+    capacity: 6,
+  },
+  partnerMfaTotpVerify: {
+    kind: "fixed window",
+    rate: 10,
+    period: 10 * MINUTE,
+  },
   kycSubmit: { kind: "fixed window", rate: 3, period: HOUR },
   contactSubmit: { kind: "fixed window", rate: 5, period: HOUR },
   // iCarte (wallet) : create/update/remove/setFeatured/reorder — token bucket par user.

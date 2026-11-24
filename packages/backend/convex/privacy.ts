@@ -152,7 +152,10 @@ export const getDeletionStatus = query({
     return {
       deletionRequestedAt: profile.deletionRequestedAt,
       deletionScheduledAt: profile.deletionScheduledAt,
-      daysRemaining: Math.max(0, Math.ceil(msRemaining / (24 * 60 * 60 * 1000))),
+      daysRemaining: Math.max(
+        0,
+        Math.ceil(msRemaining / (24 * 60 * 60 * 1000)),
+      ),
     }
   },
 })
@@ -169,18 +172,19 @@ export const requestDataExport = mutation({
       throws: true,
     })
 
-    await ctx.runMutation(internal.audit.recordAudit, {
+    const requestId = await ctx.runMutation(internal.audit.recordAudit, {
       actorId: user.userId,
       action: "admin_action",
       targetType: "user",
       targetId: user.userId,
-      metadata: { kind: "data_export_requested" },
+      metadata: { kind: "data_export_requested", email: user.email },
     })
 
     // Schedule l'action async qui collecte + écrit dans _storage + email.
     await ctx.scheduler.runAfter(0, internal.privacy.exportRun.runDataExport, {
       userId: user.userId,
       email: user.email,
+      requestId,
     })
 
     return null

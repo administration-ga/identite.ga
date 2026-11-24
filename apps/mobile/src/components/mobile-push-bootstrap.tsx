@@ -3,9 +3,10 @@ import { Platform } from "react-native"
 import Constants from "expo-constants"
 import * as Device from "expo-device"
 import * as Notifications from "expo-notifications"
-import { useRouter } from "expo-router"
+import { useRouter, useSegments } from "expo-router"
 import { useConvexAuth, useMutation } from "convex/react"
 import { api } from "@/lib/api"
+import { canOpenPush, pushNavigation } from "@/lib/push-navigation"
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -16,42 +17,48 @@ Notifications.setNotificationHandler({
   }),
 })
 
-function openNotificationUrl(url: unknown, push: (path: string) => void) {
-  if (typeof url !== "string") return
-  const messageId = /[?&]id=([^&]+)/.exec(url)?.[1]
-  if (messageId) {
-    push(`/iboite/email/${decodeURIComponent(messageId)}`)
-    return
-  }
-  if (url.startsWith("/")) push(url)
-}
-
 export function MobilePushBootstrap() {
   const router = useRouter()
-  const { isAuthenticated } = useConvexAuth()
+  const { isAuthenticated, isLoading } = useConvexAuth()
+  const segments = useSegments()
+  const root = segments[0] ?? "index"
+  const pending = React.useSyncExternalStore(
+    pushNavigation.subscribe, pushNavigation.getSnapshot, pushNavigation.getSnapshot,
+  )
   const subscribe = useMutation(api.nativePushSubscriptions.subscribe)
   const registered = React.useRef(false)
 
   React.useEffect(() => {
     if (Platform.OS === "web") return
-    const listener = Notifications.addNotificationResponseReceivedListener(
-      (response) => {
-        openNotificationUrl(
-          response.notification.request.content.data?.url,
-          (path) => router.push(path as never),
-        )
-      },
-    )
-    void Notifications.getLastNotificationResponseAsync().then((response) => {
-      if (response) {
-        openNotificationUrl(
-          response.notification.request.content.data?.url,
-          (path) => router.push(path as never),
-        )
-      }
+    let active = true
+    let receivedLiveResponse = false
+    const receive = (response: Notifications.NotificationResponse) => {
+      const request = response.notification.request
+      pushNavigation.receive(
+        `${request.identifier}:${response.actionIdentifier}:${response.notification.date}`,
+        request.content.data?.url,
+      )
+      void Notifications.clearLastNotificationResponseAsync().catch(() => {})
+    }
+    const listener = Notifications.addNotificationResponseReceivedListener((response) => {
+      receivedLiveResponse = true
+      receive(response)
     })
-    return () => listener.remove()
-  }, [router])
+    void Notifications.getLastNotificationResponseAsync().then((response) => {
+      // Ne pas rejouer une ancienne réponse après un clic plus récent, ni
+      // depuis un effet démonté (notamment sous StrictMode).
+      if (active && !receivedLiveResponse && response) receive(response)
+    }).catch(() => { /* Une lecture impossible ne doit pas bloquer le lancement. */ })
+    return () => {
+      active = false
+      listener.remove()
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (!pushNavigation.getSnapshot() || !canOpenPush(isAuthenticated, isLoading, root)) return
+    router.push(pushNavigation.take() as never)
+  }, [isAuthenticated, isLoading, pending, root, router])
 
   React.useEffect(() => {
     if (!isAuthenticated) {

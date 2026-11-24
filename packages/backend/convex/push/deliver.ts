@@ -32,6 +32,8 @@ export const notification = internalAction({
     title: v.string(),
     body: v.string(),
     url: v.optional(v.string()),
+    /** N'envoyer qu'aux appareils de l'app mobile (ex. confirmation de connexion). */
+    nativeOnly: v.optional(v.boolean()),
   },
   returns: v.object({ sent: v.number(), stale: v.number() }),
   handler: async (ctx, args) => {
@@ -40,7 +42,7 @@ export const notification = internalAction({
     let sent = 0
     let stale = 0
 
-    if (publicKey && privateKey) {
+    if (publicKey && privateKey && !args.nativeOnly) {
       webpush.setVapidDetails(
         "mailto:support@identite.ga",
         publicKey,

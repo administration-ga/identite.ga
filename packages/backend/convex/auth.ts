@@ -10,9 +10,9 @@ import {
   emailOTP,
   haveIBeenPwned,
   jwt,
-  oneTimeToken,
   oidcProvider,
   twoFactor,
+  type OIDCOptions,
 } from "better-auth/plugins"
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -41,7 +41,10 @@ import { components, internal } from "./_generated/api"
 import type { DataModel } from "./_generated/dataModel"
 import { query } from "./_generated/server"
 import authConfig from "./auth.config"
+import authSchema from "./betterAuth/schema"
 import { pinSignIn } from "./lib/pinSignInPlugin"
+import { partnerHandoffOneTimeToken } from "./lib/partnerHandoffToken"
+import { partnerTokenExchange } from "./lib/partnerTokenExchange"
 import { userinfoClaimsForScopes, type UserinfoProfile } from "./lib/userinfoClaims"
 import {
   handleSignInTwoFactorGate,
@@ -56,13 +59,19 @@ const isDev = process.env.NODE_ENV !== "production"
  * dynamiquement n'importe quel `localhost` / `127.0.0.1` / `*.local`
  * venant du header Origin.
  *
+ * Le scheme de l'app mobile (`idn://`, transmis par le plugin expo via
+ * `expo-origin`) est toujours ajouté : sans lui, toute requête mobile
+ * authentifiée (cookie de session) est refusée « Invalid origin » — dont
+ * l'enrôlement Face ID (`/passkey/generate-register-options`).
+ *
  * Set via : `bunx convex env set TRUSTED_ORIGINS "https://...,https://..."`
  */
-function parseTrustedOrigins(): string[] {
-  return (process.env.TRUSTED_ORIGINS ?? "")
+export function parseTrustedOrigins(): string[] {
+  const fromEnv = (process.env.TRUSTED_ORIGINS ?? "")
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean)
+  return [...fromEnv, "idn://"]
 }
 
 /**
@@ -85,11 +94,14 @@ function resolveSiteUrl(origin?: string | null): string {
 
 /**
  * Client Better Auth + Convex.
- * Le composant @convex-dev/better-auth gère ses propres tables (user,
- * account, session, oauthApplication, oauthConsent, jwks, etc.) dans
- * son namespace isolé.
+ * Le composant Better Auth (installé localement, cf. betterAuth/) gère ses
+ * propres tables (user, account, session, oauthApplication, oauthConsent,
+ * jwks, passkey, etc.) dans son namespace isolé.
  */
-export const authComponent = createClient<DataModel>(components.betterAuth)
+export const authComponent = createClient<DataModel, typeof authSchema>(
+  components.betterAuth,
+  { local: { schema: authSchema } },
+)
 
 /**
  * Configuration Better Auth — appelée à chaque requête HTTP via http.ts.
@@ -104,6 +116,45 @@ export const createAuth = (
   ctx: GenericCtx<DataModel>,
   requestOrigin?: string | null,
 ): Auth => {
+  // Injecte le claim `env` (sandbox/production) dans l'ID token et la
+  // réponse /oauth2/userinfo. Sert aussi de filet défensif : si un
+  // utilisateur non whitelisté contourne l'UI consent en sandbox, on
+  // throw — Better Auth refuse alors l'émission du token.
+  //
+  // Partagée par `oidcProvider` et `partnerTokenExchange` : les deux voies
+  // d'émission doivent produire les mêmes claims.
+  const getAdditionalUserInfoClaim: NonNullable<
+    OIDCOptions["getAdditionalUserInfoClaim"]
+  > = async (user, scopes, client) => {
+    const meta = (client.metadata ?? {}) as Record<string, unknown>
+    const env = meta.env === "production" ? "production" : "sandbox"
+    if (env === "sandbox") {
+      const list = Array.isArray(meta.testUsers)
+        ? (meta.testUsers as unknown[]).map((e) =>
+            typeof e === "string" ? e.toLowerCase() : "",
+          )
+        : []
+      const email = String(
+        (user as { email?: unknown }).email ?? "",
+      ).toLowerCase()
+      const ownerId =
+        typeof meta.createdBy === "string" ? meta.createdBy : null
+      const userId = String((user as { id?: unknown }).id ?? "")
+      if (
+        email.length > 0 &&
+        !list.includes(email) &&
+        (ownerId === null || userId !== ownerId)
+      ) {
+        throw new Error("sandbox_access_denied")
+      }
+    }
+    // Scopes fournis par le jeton validé, jamais par une query utilisateur.
+    const profile: UserinfoProfile | null = scopes.some((scope) =>
+      scope === "profile" || scope === "idn:civil_status",
+    ) ? await ctx.runQuery(internal.profile.getForUserinfo, { userId: user.id }) : null
+    return { env, ...userinfoClaimsForScopes(scopes, profile) }
+  }
+
   return betterAuth({
     appName: "IDN",
     // baseURL = CONVEX_SITE_URL pour que le JWT `iss` corresponde à ce
@@ -307,7 +358,9 @@ export const createAuth = (
       //
       // NB : ne sert plus aux transferts entre surfaces IDN — depuis la fusion
       // de connect.identite.ga dans identite.ga, il n'y a plus qu'un domaine.
-      oneTimeToken(),
+      // Emballé pour survivre à `crossDomain()`, qui déclare la même clé
+      // d'endpoint (cf. lib/partnerHandoffToken.ts).
+      partnerHandoffOneTimeToken(),
 
       // Sign-in par PIN à 6 chiffres — endpoint /api/auth/sign-in/pin.
       // Le plugin reçoit (email, pin), résout l'email via Better Auth,
@@ -426,38 +479,25 @@ export const createAuth = (
         // client créé via le portail (qui stocke un hash) échouait alors au token
         // endpoint avec `invalid_client`.
         storeClientSecret: "hashed",
-        // Injecte le claim `env` (sandbox/production) dans l'ID token et la
-        // réponse /oauth2/userinfo. Sert aussi de filet défensif : si un
-        // utilisateur non whitelisté contourne l'UI consent en sandbox, on
-        // throw — Better Auth refuse alors l'émission du token.
-        getAdditionalUserInfoClaim: async (user, scopes, client) => {
-          const meta = (client.metadata ?? {}) as Record<string, unknown>
-          const env = meta.env === "production" ? "production" : "sandbox"
-          if (env === "sandbox") {
-            const list = Array.isArray(meta.testUsers)
-              ? (meta.testUsers as unknown[]).map((e) =>
-                  typeof e === "string" ? e.toLowerCase() : "",
-                )
-              : []
-            const email = String(
-              (user as { email?: unknown }).email ?? "",
-            ).toLowerCase()
-            const ownerId =
-              typeof meta.createdBy === "string" ? meta.createdBy : null
-            const userId = String((user as { id?: unknown }).id ?? "")
-            if (
-              email.length > 0 &&
-              !list.includes(email) &&
-              (ownerId === null || userId !== ownerId)
-            ) {
-              throw new Error("sandbox_access_denied")
-            }
-          }
-          // Scopes fournis par le jeton validé, jamais par une query utilisateur.
-          const profile: UserinfoProfile | null = scopes.some((scope) =>
-            scope === "profile" || scope === "idn:civil_status",
-          ) ? await ctx.runQuery(internal.profile.getForUserinfo, { userId: user.id }) : null
-          return { env, ...userinfoClaimsForScopes(scopes, profile) }
+        getAdditionalUserInfoClaim,
+      }),
+
+      // Échange direct session IDN → jetons OAuth pour les partenaires de
+      // confiance (lib/partnerTokenExchange.ts). Même fonction de claims que
+      // ci-dessus : un partenaire lit exactement ce que `/userinfo` renverrait.
+      partnerTokenExchange({
+        getAdditionalUserInfoClaim,
+        onExchanged: async ({ userId, clientId, scopes, ip, userAgent }) => {
+          if (!("runMutation" in ctx)) return
+          await ctx.runMutation(internal.audit.recordAudit, {
+            actorId: userId,
+            action: "partner_token_exchanged",
+            targetType: "app",
+            targetId: clientId,
+            ip,
+            userAgent,
+            metadata: { scopes },
+          })
         },
       }),
 
