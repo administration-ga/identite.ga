@@ -306,7 +306,11 @@ const oidcDiscoveryHandler = httpAction(async (ctx, request) => {
       asResponse: false
     }) => Promise<Record<string, unknown>>
   }
-  const metadata = await api.getOpenIdConfig({ asResponse: false })
+  const {
+    // Inscription dynamique fermée (CH-820) : la route n'est plus annoncée.
+    registration_endpoint: _closedRegistrationEndpoint,
+    ...metadata
+  } = await api.getOpenIdConfig({ asResponse: false })
   const baseClaims = Array.isArray(metadata.claims_supported)
     ? (metadata.claims_supported as string[])
     : []

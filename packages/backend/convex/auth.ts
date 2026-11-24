@@ -50,6 +50,22 @@ import {
   handleSignInTwoFactorGate,
   requiresTwoFactorChallenge,
 } from "./lib/twoFactorGate"
+import {
+  accountLevel,
+  acrForLevel,
+  assertAssuranceLevel,
+  clientMinimumLevel,
+  type AssuranceLevel,
+} from "./lib/assuranceLevel"
+import {
+  AUTHORIZE_PATH,
+  DYNAMIC_REGISTRATION_PATH,
+  TOKEN_PATH,
+  attachRequestedLevel,
+  authorizationCodeFrom,
+  refuseDynamicRegistration,
+  requestedLevelOfCode,
+} from "./lib/oidcIssuanceGuards"
 
 const isDev = process.env.NODE_ENV !== "production"
 
@@ -116,6 +132,12 @@ export const createAuth = (
   ctx: GenericCtx<DataModel>,
   requestOrigin?: string | null,
 ): Auth => {
+  // Niveau demandé par `acr_values` pour le code échangé dans CETTE requête
+  // HTTP (createAuth est appelé une fois par requête, cf. http.ts). Posé par
+  // le hook `before` de /oauth2/token, lu par getAdditionalUserInfoClaim qui
+  // s'exécute après l'authentification du client et la vérification PKCE.
+  let requestedLevelForThisRequest: 0 | AssuranceLevel = 0
+
   // Injecte le claim `env` (sandbox/production) dans l'ID token et la
   // réponse /oauth2/userinfo. Sert aussi de filet défensif : si un
   // utilisateur non whitelisté contourne l'UI consent en sandbox, on
@@ -148,11 +170,27 @@ export const createAuth = (
         throw new Error("sandbox_access_denied")
       }
     }
-    // Scopes fournis par le jeton validé, jamais par une query utilisateur.
-    const profile: UserinfoProfile | null = scopes.some((scope) =>
-      scope === "profile" || scope === "idn:civil_status",
-    ) ? await ctx.runQuery(internal.profile.getForUserinfo, { userId: user.id }) : null
-    return { env, ...userinfoClaimsForScopes(scopes, profile) }
+    // Le profil est toujours lu : il porte le niveau du compte, contrôlé à
+    // chaque émission (jeton, userinfo, échange partenaire). Les claims
+    // d'identité, eux, restent filtrés par les scopes du jeton validé.
+    const profile: UserinfoProfile | null = await ctx.runQuery(
+      internal.profile.getForUserinfo,
+      { userId: user.id },
+    )
+    const level = accountLevel(profile)
+    const required = Math.max(
+      clientMinimumLevel(client.metadata),
+      requestedLevelForThisRequest,
+    ) as AssuranceLevel
+    assertAssuranceLevel(level, required)
+    return {
+      env,
+      ...userinfoClaimsForScopes(scopes, profile),
+      // Après les claims de scope : `acr` remplace la valeur fixe de Better
+      // Auth (« urn:mace:incommon:iap:silver ») même sans le scope `profile`.
+      acr: acrForLevel(level as AssuranceLevel),
+      loa: level,
+    }
   }
 
   return betterAuth({
@@ -281,6 +319,23 @@ export const createAuth = (
       useSecureCookies: isDev ? false : undefined,
     },
     hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        // Inscription dynamique fermée à tous (CH-820) : sessions ordinaires
+        // comprises. Le portail développeur et l'approbation d'un
+        // administrateur sont les seules voies de création d'un client.
+        if (ctx.path === DYNAMIC_REGISTRATION_PATH) refuseDynamicRegistration()
+        // Échange du code : relire le niveau exigé à l'autorisation, sans
+        // consommer le code (Better Auth le consomme juste après).
+        if (ctx.path === TOKEN_PATH) {
+          const body = (ctx.body ?? {}) as Record<string, unknown>
+          if (body.grant_type === "authorization_code") {
+            requestedLevelForThisRequest = await requestedLevelOfCode(
+              ctx.context.internalAdapter,
+              body.code,
+            )
+          }
+        }
+      }),
       // Gate 2FA générique pour TOUS les endpoints /sign-in/* — deux failles
       // corrigées ici :
       //
@@ -334,6 +389,20 @@ export const createAuth = (
       // `deleteSessionCookie` (expiration du cookie de session côté
       // navigateur, pas la partie sécurité critique) reste appelé ici.
       after: createAuthMiddleware(async (ctx) => {
+        // Le niveau demandé par `acr_values` suit le code d'autorisation
+        // jusqu'à son échange (le consentement conserve la valeur).
+        if (ctx.path === AUTHORIZE_PATH) {
+          const code = authorizationCodeFrom(ctx.context.returned)
+          const query = (ctx.query ?? {}) as Record<string, unknown>
+          if (code) {
+            await attachRequestedLevel(
+              ctx.context.internalAdapter,
+              code,
+              query.acr_values,
+            )
+          }
+          return
+        }
         const data = ctx.context.newSession
         const isGated =
           ctx.path?.startsWith("/sign-in") &&
