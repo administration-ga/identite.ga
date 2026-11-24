@@ -4,7 +4,9 @@ import { register as registerBetterAuth } from "@convex-dev/better-auth/test"
 import { convexTest } from "convex-test"
 import { describe, expect, test, vi } from "vitest"
 
-import { components } from "./_generated/api"
+import { createLocalJWKSet, jwtVerify } from "jose"
+
+import { components, internal } from "./_generated/api"
 import { hashClientSecret } from "./lib/partnerClientAuth"
 import schema from "./schema"
 
@@ -434,5 +436,138 @@ describe("échange partenaire (/oauth2/partner-token-exchange)", () => {
     } finally {
       vi.unstubAllEnvs()
     }
+  })
+})
+
+describe("rotation des clés de signature", () => {
+  async function keyRows(t: TestClient) {
+    return await t.run(async (ctx) => {
+      const page = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+        model: "jwks",
+        paginationOpts: { numItems: 100, cursor: null },
+      })) as { page: Array<{ _id: string; publicKey: string; privateKey: string; createdAt: number }> }
+      return page.page
+    })
+  }
+
+  async function issueIdToken(t: TestClient, level: Level = 2) {
+    const { userId, token } = await seedCitizen(t, level, `citoyen.${Math.random().toString(36).slice(2, 8)}@idn.ga`)
+    const clientId = await seedClient(t, { loa: 1, consentFor: userId })
+    const { code, verifier } = await authorize(t, token, clientId)
+    return await exchange(t, clientId, code as string, verifier)
+  }
+
+  test("/oauth2/token signe avec la clé la plus récente quand deux clés coexistent", async () => {
+    const t = makeTestClient()
+    const first = await issueIdToken(t)
+    expect(first.res.status).toBe(200)
+    const [only] = await keyRows(t)
+    expect(only).toBeTruthy()
+    // Deuxième ligne, plus récente (même matière, autre identifiant) : c'est
+    // l'état laissé par une rotation. L'adaptateur Convex rend createdAt en
+    // nombre ; le tri de la clé la plus récente plantait (TypeError, 500).
+    const newer = await t.run(async (ctx) =>
+      (await ctx.runMutation(components.betterAuth.adapter.create, {
+        input: {
+          model: "jwks",
+          data: { publicKey: only!.publicKey, privateKey: only!.privateKey, createdAt: only!.createdAt + 1000 },
+        },
+      })) as { _id: string },
+    )
+    const second = await issueIdToken(t)
+    expect(second.res.status).toBe(200)
+    const header = JSON.parse(atob(String(second.body.id_token).split(".")[0]!.replace(/-/g, "+").replace(/_/g, "/")))
+    expect(header.kid).toBe(newer._id)
+  })
+
+  async function publishedJwks(t: TestClient) {
+    const res = await t.fetch("/api/auth/convex/jwks")
+    expect(res.status).toBe(200)
+    return (await res.json()) as { keys: Array<{ kid: string; alg: string; n: string }> }
+  }
+
+  const kidOf = (jwt: string) =>
+    JSON.parse(atob(jwt.split(".")[0]!.replace(/-/g, "+").replace(/_/g, "/"))).kid as string
+
+  async function verifyAgainstPublished(t: TestClient, jwt: string, audience: string) {
+    const jwks = createLocalJWKSet(await publishedJwks(t))
+    return await jwtVerify(jwt, jwks, { algorithms: ["RS256"], audience })
+  }
+
+  async function issueFor(t: TestClient) {
+    const { userId, token } = await seedCitizen(t, 2, `citoyen.${Math.random().toString(36).slice(2, 8)}@idn.ga`)
+    const clientId = await seedClient(t, { loa: 1, consentFor: userId })
+    const { code, verifier } = await authorize(t, token, clientId)
+    const { body } = await exchange(t, clientId, code as string, verifier)
+    return { idToken: String(body.id_token), clientId, sessionToken: token }
+  }
+
+  test("rotation : les jetons de l'ancienne clé restent valides, les nouveaux portent la nouvelle", async () => {
+    const t = makeTestClient()
+    const before = await issueFor(t)
+    const kidA = kidOf(before.idToken)
+    expect((await publishedJwks(t)).keys.map((k) => k.kid)).toEqual([kidA])
+
+    const rotated = await t.action(internal.jwksRotation.rotate, { force: true })
+    expect(rotated.rotated).toBe(true)
+    const kidB = rotated.kid as string
+    expect(kidB).not.toBe(kidA)
+
+    // Les deux clés sont publiées, en RS256 ; la nouvelle est RSA 3072.
+    const jwks = await publishedJwks(t)
+    expect(jwks.keys.map((k) => k.kid).sort()).toEqual([kidA, kidB].sort())
+    expect(jwks.keys.every((k) => k.alg === "RS256")).toBe(true)
+    const listed = await t.action(internal.jwksRotation.list, {})
+    expect(listed[0]).toMatchObject({ kid: kidB, active: true, modulusBits: 3072 })
+
+    // Jeton de A, émis avant la rotation : toujours accepté.
+    await expect(verifyAgainstPublished(t, before.idToken, before.clientId)).resolves.toBeTruthy()
+    // Nouvel ID token et nouveau JWT Convex : signés par B, acceptés.
+    const after = await issueFor(t)
+    expect(kidOf(after.idToken)).toBe(kidB)
+    await expect(verifyAgainstPublished(t, after.idToken, after.clientId)).resolves.toBeTruthy()
+    const convexToken = await t.fetch("/api/auth/convex/token", {
+      headers: { Authorization: `Bearer ${after.sessionToken}` },
+    })
+    expect(convexToken.status).toBe(200)
+    const { token: convexJwt } = (await convexToken.json()) as { token: string }
+    expect(kidOf(convexJwt)).toBe(kidB)
+    await expect(verifyAgainstPublished(t, convexJwt, "convex")).resolves.toBeTruthy()
+
+    // Purge immédiate : rien, A reste publiée 7 jours.
+    expect((await t.action(internal.jwksRotation.prune, {})).pruned).toEqual([])
+    // Sans geste forcé ni rotation armée, rien ne tourne.
+    expect((await t.action(internal.jwksRotation.rotate, {})).rotated).toBe(false)
+  })
+
+  test("révocation : la clé retirée n'est plus publiée, la clé active exige une confirmation", async () => {
+    const t = makeTestClient()
+    const before = await issueFor(t)
+    const kidA = kidOf(before.idToken)
+    const { kid: kidB } = await t.action(internal.jwksRotation.rotate, { force: true })
+
+    await t.action(internal.jwksRotation.revoke, { kid: kidA })
+    expect((await publishedJwks(t)).keys.map((k) => k.kid)).toEqual([kidB])
+    await expect(verifyAgainstPublished(t, before.idToken, before.clientId)).rejects.toThrow()
+
+    await expect(t.action(internal.jwksRotation.revoke, { kid: kidB as string })).rejects.toThrow(
+      /confirmLatest/,
+    )
+    const last = await t.action(internal.jwksRotation.revoke, { kid: kidB as string, confirmLatest: true })
+    expect(last.replacement).toBeTruthy()
+    // Jamais de JWKS vide.
+    expect((await publishedJwks(t)).keys.map((k) => k.kid)).toEqual([last.replacement])
+  })
+
+  test("aucune source n'appelle la rotation destructrice du plugin convex", async () => {
+    const sources = import.meta.glob("/convex/**/*.ts", { query: "?raw", import: "default", eager: true }) as Record<
+      string,
+      string
+    >
+    const offenders = Object.entries(sources)
+      .filter(([path]) => !path.includes("/_generated/") && !path.endsWith(".test.ts"))
+      .filter(([, code]) => /\brotateKeys\b|jwksRotateOnTokenGenerationError|rotate-keys/.test(code))
+      .map(([path]) => path)
+    expect(offenders).toEqual([])
   })
 })

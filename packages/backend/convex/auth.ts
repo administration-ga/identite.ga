@@ -61,6 +61,7 @@ import {
   DYNAMIC_REGISTRATION_PATH,
   refuseDynamicRegistration,
 } from "./lib/oidcIssuanceGuards"
+import { readSigningKeys, SIGNING_KEY_PAIR_CONFIG } from "./lib/signingKeys"
 
 const isDev = process.env.NODE_ENV !== "production"
 
@@ -545,8 +546,12 @@ export const createAuth = (
       }),
 
       // Émission ID tokens RS256 + JWKS publique (§6.1)
+      // Lecture des clés normalisée (dates en `Date`) : sans elle, dès deux
+      // clés en base (rotation), `/oauth2/token` levait une TypeError (500).
+      // Les clés créées par rotation sont RSA 3072 (lib/signingKeys.ts).
       jwt({
-        jwks: { keyPairConfig: { alg: "RS256", modulusLength: 2048 } },
+        jwks: { keyPairConfig: SIGNING_KEY_PAIR_CONFIG },
+        adapter: { getJwks: readSigningKeys },
       }),
 
       // Plugin requis par @convex-dev/better-auth pour exposer l'auth à
