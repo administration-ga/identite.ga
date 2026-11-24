@@ -190,6 +190,14 @@ export const partnerTokenExchange = (options: PartnerTokenExchangeOptions) => ({
           )
         }
 
+        // 5. Claims d'abord : ils portent les refus (bac à sable, niveau d'un
+        //    client strict). Aucun jeton n'est écrit si l'émission est refusée.
+        const extraClaims = await options.getAdditionalUserInfoClaim(
+          user,
+          requestedScopes,
+          client,
+        )
+
         // Émission — même ligne que `/oauth2/token` (oidc-provider/index.mjs).
         const iat = Math.floor(Date.now() / 1000)
         const accessToken = generateRandomString(32, "a-z", "A-Z")
@@ -223,12 +231,6 @@ export const partnerTokenExchange = (options: PartnerTokenExchangeOptions) => ({
           family_name: has("profile") ? user.name.split(" ")[1] : undefined,
           email_verified: has("email") ? user.emailVerified : undefined,
         }
-        const extraClaims = await options.getAdditionalUserInfoClaim(
-          user,
-          requestedScopes,
-          client,
-        )
-
         try {
           await options.onExchanged?.({
             userId: user.id,

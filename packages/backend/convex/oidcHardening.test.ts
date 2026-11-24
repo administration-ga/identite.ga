@@ -2,7 +2,7 @@
 import { register as registerAggregate } from "@convex-dev/aggregate/test"
 import { register as registerBetterAuth } from "@convex-dev/better-auth/test"
 import { convexTest } from "convex-test"
-import { describe, expect, test } from "vitest"
+import { describe, expect, test, vi } from "vitest"
 
 import { components } from "./_generated/api"
 import { hashClientSecret } from "./lib/partnerClientAuth"
@@ -32,7 +32,7 @@ function makeTestClient() {
 type TestClient = ReturnType<typeof makeTestClient>
 
 /** Un citoyen ordinaire, avec sa session Better Auth et son niveau. */
-async function seedCitizen(t: TestClient, loa: Level, email = "citoyen.ordinaire@idn.ga") {
+async function seedCitizen(t: TestClient, loa: Level | null, email = "citoyen.ordinaire@idn.ga") {
   const now = Date.now()
   const token = `jeton-de-session-${loa}-${Math.random().toString(36).slice(2)}`
   return await t.run(async (ctx) => {
@@ -48,7 +48,7 @@ async function seedCitizen(t: TestClient, loa: Level, email = "citoyen.ordinaire
         data: { token, userId: user._id, expiresAt: now + 3_600_000, createdAt: now, updatedAt: now },
       },
     })
-    await ctx.db.insert("userProfile", {
+    if (loa !== null) await ctx.db.insert("userProfile", {
       userId: user._id,
       profileType: "citizen",
       loa,
@@ -73,7 +73,15 @@ async function setLevel(t: TestClient, userId: string, loa: Level) {
 /** Client confidentiel de production, déjà consenti par le citoyen. */
 async function seedClient(
   t: TestClient,
-  opts: { loa: Level; clientId?: string; consentFor?: string; scopes?: string[] },
+  opts: {
+    loa: Level | "illisible"
+    strict?: boolean
+    env?: "production" | "sandbox"
+    testUsers?: string[]
+    clientId?: string
+    consentFor?: string
+    scopes?: string[]
+  },
 ) {
   const now = Date.now()
   const clientId = opts.clientId ?? `idn_test_${opts.loa}_${Math.random().toString(36).slice(2, 8)}`
@@ -91,13 +99,14 @@ async function seedClient(
           disabled: false,
           userId: "",
           metadata: JSON.stringify({
-            env: "production",
+            env: opts.env ?? "production",
             loa: opts.loa,
+            ...(opts.strict ? { loaEnforcement: "strict" } : {}),
             description: "",
             scopes,
             createdBy: "",
             services: [],
-            testUsers: [],
+            testUsers: opts.testUsers ?? [],
             status: "production",
           }),
           createdAt: now,
@@ -234,41 +243,70 @@ describe("inscription dynamique des clients (/oauth2/register)", () => {
 })
 
 describe("niveau d'assurance contrôlé à l'émission", () => {
-  test("refuse le jeton quand le compte est sous le minimum du client", async () => {
+  test("client strict : refuse le jeton quand le compte est sous son minimum", async () => {
+    const t = makeTestClient()
+    const { userId, token } = await seedCitizen(t, 1)
+    const clientId = await seedClient(t, { loa: 2, strict: true, consentFor: userId })
+    // Client déjà consenti : Better Auth rend le code sans écran, c'est
+    // l'émission du jeton qui refuse.
+    const { code, verifier } = await authorize(t, token, clientId)
+    expect(code).toBeTruthy()
+    const { res, body } = await exchange(t, clientId, code as string, verifier)
+    expect(res.status).toBe(403)
+    expect(body.id_token).toBeUndefined()
+    expect(body.access_token).toBeUndefined()
+    expect(body.error).toBe("access_denied")
+    expect(String(body.error_description)).toMatch(/^unmet_authentication_requirements: eidas2/)
+  })
+
+  test("client strict au niveau illisible : plancher 3", async () => {
+    const t = makeTestClient()
+    const { userId, token } = await seedCitizen(t, 2)
+    const clientId = await seedClient(t, { loa: "illisible", strict: true, consentFor: userId })
+    const { code, verifier } = await authorize(t, token, clientId)
+    const { res, body } = await exchange(t, clientId, code as string, verifier)
+    expect(res.status).toBe(403)
+    expect(String(body.error_description)).toMatch(/eidas3/)
+  })
+
+  test("client strict : refuse un compte sans profil", async () => {
+    const t = makeTestClient()
+    const { userId, token } = await seedCitizen(t, null)
+    const clientId = await seedClient(t, { loa: 1, strict: true, consentFor: userId })
+    const { code, verifier } = await authorize(t, token, clientId)
+    const { res } = await exchange(t, clientId, code as string, verifier)
+    expect(res.status).toBe(403)
+  })
+
+  test("client progressif : jeton émis au niveau réel, que l'application vérifie", async () => {
     const t = makeTestClient()
     const { userId, token } = await seedCitizen(t, 1)
     const clientId = await seedClient(t, { loa: 2, consentFor: userId })
-    const { code, verifier, location } = await authorize(t, token, clientId)
-    // Le contrôle ne vit plus seulement dans l'écran de consentement : un
-    // client déjà consenti reçoit le code sans écran, l'émission refuse.
-    if (code) {
-      const { res, body } = await exchange(t, clientId, code, verifier)
-      expect(res.status).toBe(403)
-      expect(body.id_token).toBeUndefined()
-      expect(body.error).toBe("access_denied")
-    } else {
-      expect(location).toMatch(/error=access_denied/)
-    }
+    const { code, verifier } = await authorize(t, token, clientId)
+    const { res, body } = await exchange(t, clientId, code as string, verifier)
+    expect(res.status).toBe(200)
+    expect(claimsOf(String(body.id_token)).acr).toBe("eidas1")
   })
 
-  test("refuse le jeton quand acr_values exige plus que le compte", async () => {
+  test("acr_values reste une demande : le serveur émet le niveau réel", async () => {
     const t = makeTestClient()
     const { userId, token } = await seedCitizen(t, 2)
     const clientId = await seedClient(t, { loa: 1, consentFor: userId })
-    const { code, verifier, location } = await authorize(t, token, clientId, { acr_values: "eidas3" })
-    if (code) {
-      const { res, body } = await exchange(t, clientId, code, verifier)
-      expect(res.status).toBe(403)
-      expect(body.id_token).toBeUndefined()
-    } else {
-      expect(location).toMatch(/error=access_denied/)
-    }
+    const { code, verifier } = await authorize(t, token, clientId, { acr_values: "eidas3" })
+    const { res, body } = await exchange(t, clientId, code as string, verifier)
+    expect(res.status).toBe(200)
+    expect(claimsOf(String(body.id_token)).acr).toBe("eidas2")
   })
 
   test("porte acr et loa dans l'ID token au niveau du compte, même sans le scope profile", async () => {
     const t = makeTestClient()
     const { userId, token } = await seedCitizen(t, 2)
-    const clientId = await seedClient(t, { loa: 2, consentFor: userId, scopes: ["openid"] })
+    const clientId = await seedClient(t, {
+      loa: 2,
+      strict: true,
+      consentFor: userId,
+      scopes: ["openid"],
+    })
     const { code, verifier } = await authorize(t, token, clientId, { scope: "openid" })
     expect(code).toBeTruthy()
     const { res, body } = await exchange(t, clientId, code as string, verifier)
@@ -277,12 +315,26 @@ describe("niveau d'assurance contrôlé à l'émission", () => {
     expect(claims.acr).toBe("eidas2")
     expect(claims.loa).toBe(2)
     expect(claims.nonce).toBe("nonce-ch820")
+    // auth_time n'est jamais émis en millisecondes.
+    expect(claims.auth_time === undefined || Number(claims.auth_time) < 1e11).toBe(true)
   })
 
-  test("refuse userinfo si le compte est redescendu sous le minimum du client", async () => {
+  test("compte sans profil sur un client progressif : acr « 0 » et loa 0", async () => {
+    const t = makeTestClient()
+    const { userId, token } = await seedCitizen(t, null)
+    const clientId = await seedClient(t, { loa: 1, consentFor: userId })
+    const { code, verifier } = await authorize(t, token, clientId)
+    const { res, body } = await exchange(t, clientId, code as string, verifier)
+    expect(res.status).toBe(200)
+    const claims = claimsOf(String(body.id_token))
+    expect(claims.acr).toBe("0")
+    expect(claims.loa).toBe(0)
+  })
+
+  test("client strict : refuse userinfo si le compte est redescendu sous son minimum", async () => {
     const t = makeTestClient()
     const { userId, token } = await seedCitizen(t, 2)
-    const clientId = await seedClient(t, { loa: 2, consentFor: userId })
+    const clientId = await seedClient(t, { loa: 2, strict: true, consentFor: userId })
     const { code, verifier } = await authorize(t, token, clientId)
     const { body } = await exchange(t, clientId, code as string, verifier)
     expect(body.access_token).toBeTruthy()
@@ -291,5 +343,96 @@ describe("niveau d'assurance contrôlé à l'émission", () => {
       headers: { Authorization: `Bearer ${String(body.access_token)}` },
     })
     expect(res.status).toBe(403)
+  })
+
+  test("bac à sable : un usager hors liste reçoit 403 access_denied, pas une erreur serveur", async () => {
+    const t = makeTestClient()
+    const { userId, token } = await seedCitizen(t, 2)
+    const clientId = await seedClient(t, {
+      loa: 1,
+      env: "sandbox",
+      testUsers: ["testeur.autorise@idn.ga"],
+      consentFor: userId,
+    })
+    const { code, verifier } = await authorize(t, token, clientId)
+    const { res, body } = await exchange(t, clientId, code as string, verifier)
+    expect(res.status).toBe(403)
+    expect(body.error).toBe("access_denied")
+    expect(String(body.error_description)).toMatch(/^sandbox_access_denied/)
+  })
+})
+
+describe("échange partenaire (/oauth2/partner-token-exchange)", () => {
+  async function seedOneTimeToken(t: TestClient, sessionToken: string) {
+    const subject = `ott-${Math.random().toString(36).slice(2)}`
+    const now = Date.now()
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.betterAuth.adapter.create, {
+        input: {
+          model: "verification",
+          data: {
+            identifier: `one-time-token:${subject}`,
+            value: sessionToken,
+            expiresAt: now + 180_000,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      })
+    })
+    return subject
+  }
+
+  async function countAccessTokens(t: TestClient) {
+    return await t.run(async (ctx) => {
+      const page = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+        model: "oauthAccessToken",
+        paginationOpts: { numItems: 100, cursor: null },
+      })) as { page: unknown[] }
+      return page.page.length
+    })
+  }
+
+  test("client strict : refuse sous son minimum sans écrire de jeton", async () => {
+    const t = makeTestClient()
+    const { userId, token } = await seedCitizen(t, 1)
+    const clientId = await seedClient(t, { loa: 2, strict: true, consentFor: userId })
+    vi.stubEnv("IDN_TOKEN_EXCHANGE_CLIENT_IDS", clientId)
+    try {
+      const subject = await seedOneTimeToken(t, token)
+      const res = await t.fetch("/api/auth/oauth2/partner-token-exchange", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: clientId, client_secret: CLIENT_SECRET, subject_token: subject }),
+      })
+      const body = (await res.json()) as Record<string, unknown>
+      expect(res.status).toBe(403)
+      expect(body.error).toBe("access_denied")
+      expect(body.access_token).toBeUndefined()
+      expect(await countAccessTokens(t)).toBe(0)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  test("client strict au niveau atteint : jeton et acr rendus", async () => {
+    const t = makeTestClient()
+    const { userId, token } = await seedCitizen(t, 2)
+    const clientId = await seedClient(t, { loa: 2, strict: true, consentFor: userId })
+    vi.stubEnv("IDN_TOKEN_EXCHANGE_CLIENT_IDS", clientId)
+    try {
+      const subject = await seedOneTimeToken(t, token)
+      const res = await t.fetch("/api/auth/oauth2/partner-token-exchange", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: clientId, client_secret: CLIENT_SECRET, subject_token: subject }),
+      })
+      const body = (await res.json()) as { access_token?: string; userinfo?: Record<string, unknown> }
+      expect(res.status).toBe(200)
+      expect(body.access_token).toBeTruthy()
+      expect(body.userinfo?.acr).toBe("eidas2")
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })

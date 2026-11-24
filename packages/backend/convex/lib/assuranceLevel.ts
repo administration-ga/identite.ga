@@ -1,62 +1,61 @@
 import { APIError } from "better-auth/api"
 
 /**
- * Niveau de garantie (eIDAS faible, substantiel, élevé) contrôlé à l'émission
- * des jetons — CH-820.
+ * Niveau de garantie (eIDAS faible, substantiel, élevé) à l'émission des
+ * jetons — CH-820, ADR 0002.
  *
- * L'écran de consentement affichait déjà « niveau trop bas », mais Better Auth
- * émet le code sans écran pour un client déjà consenti, et l'échange partenaire
- * n'a pas d'écran du tout : le contrôle vit donc ici, au moment où un jeton ou
- * des claims sortent d'IDN, et le niveau part dans la revendication `acr`.
+ * - Le niveau du compte part TOUJOURS dans `acr` (eidas1..3, « 0 » sans
+ *   profil) et `loa`, quels que soient les scopes : l'application vérifie
+ *   elle-même le niveau qu'elle a demandé en `acr_values` (SDK `minLevel`).
+ * - Un client STRICT (`metadata.loaEnforcement: "strict"`, posé par
+ *   `bootstrapTrustedClient` pour les applications de l'État) n'obtient
+ *   aucun jeton ni claim sous son minimum `metadata.loa`. Les autres clients
+ *   gardent le comportement publié (docs/verification-api.md) : jeton émis au
+ *   niveau réel, revue manuelle suivie par l'application.
+ *
+ * L'écran de consentement ne suffisait pas : Better Auth rend le code sans
+ * écran à un client déjà consenti, et l'échange partenaire n'a pas d'écran.
  */
 
 export type AssuranceLevel = 1 | 2 | 3
 
-const ACR_FOR_LEVEL: Record<AssuranceLevel, string> = {
+const ACR_FOR_LEVEL: Record<0 | AssuranceLevel, string> = {
+  // Valeur OIDC Core §2 : « ne satisfait pas le niveau 1 ».
+  0: "0",
   1: "eidas1",
   2: "eidas2",
   3: "eidas3",
 }
 
-const LEVEL_FOR_ACR: Record<string, AssuranceLevel> = {
-  eidas1: 1,
-  eidas2: 2,
-  eidas3: 3,
-}
-
-export const acrForLevel = (level: AssuranceLevel): string => ACR_FOR_LEVEL[level]
+export const acrForLevel = (level: 0 | AssuranceLevel): string => ACR_FOR_LEVEL[level]
 
 const isLevel = (value: unknown): value is AssuranceLevel =>
   value === 1 || value === 2 || value === 3
 
-/**
- * Niveau exigé par `acr_values` (liste OIDC séparée par des espaces, valeurs
- * acceptables par ordre de préférence) : le plus bas des niveaux reconnus,
- * puisque chacun d'eux satisfait la demande. 0 si rien n'est reconnu.
- */
-export function levelRequestedByAcrValues(raw: unknown): 0 | AssuranceLevel {
-  if (typeof raw !== "string") return 0
-  const levels = raw
-    .split(/\s+/)
-    .map((value) => LEVEL_FOR_ACR[value])
-    .filter(isLevel)
-  return levels.length > 0 ? (Math.min(...levels) as AssuranceLevel) : 0
+export type ClientLevelPolicy = {
+  /** Refus à l'émission sous `minimum` (applications de l'État). */
+  strict: boolean
+  /** Minimum déclaré (`metadata.loa`) ; plancher 3 si illisible et strict. */
+  minimum: AssuranceLevel
 }
 
-/** Minimum déclaré par le client (`metadata.loa` du portail), 1 par défaut. */
-export function clientMinimumLevel(metadata: unknown): AssuranceLevel {
-  const raw =
-    typeof metadata === "string"
-      ? (() => {
-          try {
-            return JSON.parse(metadata) as unknown
-          } catch {
-            return null
-          }
-        })()
-      : metadata
-  const loa = raw && typeof raw === "object" ? (raw as { loa?: unknown }).loa : undefined
-  return isLevel(loa) ? loa : 1
+const parseMetadata = (metadata: unknown): Record<string, unknown> => {
+  if (typeof metadata === "string") {
+    try {
+      const parsed = JSON.parse(metadata) as unknown
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+  return metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {}
+}
+
+export function clientLevelPolicy(metadata: unknown): ClientLevelPolicy {
+  const meta = parseMetadata(metadata)
+  const strict = meta.loaEnforcement === "strict"
+  const minimum = isLevel(meta.loa) ? meta.loa : strict ? 3 : 1
+  return { strict, minimum }
 }
 
 /** Niveau du compte tel que stocké dans `userProfile.loa` ; 0 sans profil. */
@@ -74,5 +73,13 @@ export function assertAssuranceLevel(actual: 0 | AssuranceLevel, required: Assur
   throw new APIError("FORBIDDEN", {
     error: "access_denied",
     error_description: `unmet_authentication_requirements: ${acrForLevel(required)} requis`,
+  })
+}
+
+/** Usager hors de la liste de test d'un client bac à sable. */
+export function sandboxAccessDenied(): never {
+  throw new APIError("FORBIDDEN", {
+    error: "access_denied",
+    error_description: "sandbox_access_denied: compte absent de la liste de test de l'application",
   })
 }
