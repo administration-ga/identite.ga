@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values"
 
 import { internal } from "../_generated/api"
-import { action, internalMutation } from "../_generated/server"
+import { internalAction, internalMutation } from "../_generated/server"
 import { authComponent, createAuth } from "../auth"
 
 /**
@@ -24,7 +24,11 @@ import { authComponent, createAuth } from "../auth"
  * un fetch HTTP (api.pwnedpasswords.com), interdit dans une mutation Convex.
  * L'insert `userRole` passe par une `internalMutation`.
  */
-export const run = action({
+// Interne (CH-820) : la fonction était publique, donc appelable par tout
+// client du déploiement ; la garde `CONVEX_DEPLOYMENT` ci-dessous ne protège
+// rien, Convex ne posant pas cette variable dans les fonctions. Seul
+// `convex run`, avec la clé d'administration, peut désormais l'appeler.
+export const run = internalAction({
   args: {
     email: v.string(),
     password: v.string(),
