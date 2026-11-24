@@ -149,7 +149,10 @@ function OAuthAuthorizePageInner() {
 
   // Vérification déjà soumise : l'usager a fait sa part, le jeton portera son
   // niveau actuel et l'application suivra l'avancement (pas de boucle de step-up).
+  // Sauf client strict (application de l'État, CH-820) : IDN refuse alors le
+  // jeton sous son minimum, l'écran ne doit pas laisser croire le contraire.
   const verificationPending =
+    !app.strictLoA &&
     latestKyc !== null && ["submitted", "under_review", "complement_required"].includes(latestKyc.status)
 
   return (

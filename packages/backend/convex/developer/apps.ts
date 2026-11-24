@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values"
 
 import { components } from "../_generated/api"
-import { internalMutation, mutation, query } from "../_generated/server"
+import { internalMutation, internalQuery, mutation, query } from "../_generated/server"
 import { getCurrentAuthUser, requireAuth, requireDeveloper } from "../lib/auth"
 import { GRANTABLE_SCOPES } from "../lib/consentGrant"
 
@@ -74,6 +74,11 @@ interface AppMetadata {
    * Lu par admin/oauthApps.ts qui a la priorité sur `env` pour l'affichage.
    */
   status?: "pending" | "production"
+  /**
+   * Plancher de niveau appliqué à l'émission (CH-820) : sous `loa`, aucun
+   * jeton ni claim. Posé par `bootstrapTrustedClient` (applications de l'État).
+   */
+  loaEnforcement?: "strict"
 }
 
 const MAX_TEST_USERS = 25
@@ -144,6 +149,9 @@ const parseMetadata = (raw: string | null | undefined): AppMetadata => {
           : undefined,
       productionStatus,
       status,
+      // Conservé à chaque réécriture du portail : sans lui, modifier les
+      // scopes ou les URI d'un client d'État effacerait son plancher.
+      loaEnforcement: obj.loaEnforcement === "strict" ? "strict" : undefined,
     }
   } catch {
     return fallback
@@ -1259,25 +1267,76 @@ export const migrateRedirectUrlsToCsv = internalMutation({
   },
 })
 
+/** Hôtes de la boucle locale, admis en bac à sable seulement (RFC 8252 §7.3). */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"])
+
+const isLocalHost = (hostname: string): boolean =>
+  LOOPBACK_HOSTS.has(hostname) || hostname.endsWith(".localhost")
+
 /**
- * Amorçage d'un client OAuth de confiance, hors portail développeur.
+ * Règles d'une URI de retour de client d'État. Production : https seul,
+ * jamais un hôte local. Bac à sable : https, ou http sur la boucle locale
+ * (poste du développeur). Jamais de fragment, d'identifiants ni de séparateur.
+ */
+function assertTrustedRedirectUri(uri: string, env: "sandbox" | "production"): void {
+  let parsed: URL
+  try {
+    parsed = new URL(uri)
+  } catch {
+    throw new ConvexError({ code: "INVALID_INPUT", message: `Redirect URI invalide : ${uri}` })
+  }
+  if (parsed.hash || parsed.username || parsed.password || /[\s,#]/.test(uri) || uri.length > 2048) {
+    throw new ConvexError({
+      code: "INVALID_INPUT",
+      message: "Redirect URI avec fragment, identifiants ou séparateur interdit.",
+    })
+  }
+  const local = isLocalHost(parsed.hostname)
+  if (env === "production") {
+    if (parsed.protocol !== "https:" || local) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: `Redirect URI de production : https et hôte public requis (${uri}).`,
+      })
+    }
+    return
+  }
+  const httpLoopback = parsed.protocol === "http:" && LOOPBACK_HOSTS.has(parsed.hostname)
+  if (parsed.protocol !== "https:" && !httpLoopback) {
+    throw new ConvexError({
+      code: "INVALID_INPUT",
+      message: `Redirect URI de bac à sable : https, ou http sur localhost, 127.0.0.1 ou [::1] (${uri}).`,
+    })
+  }
+}
+
+/**
+ * Amorçage d'un client OAuth d'une application de l'État, hors portail
+ * développeur (NDJOBI, ae.ministere.ga…), par un opérateur disposant de la
+ * clé d'administration Convex :
  *
- * Les applications de l'État — NDJOBI, par exemple — ne suivent pas le parcours
- * sandbox du portail : elles sont provisionnées directement en production par un
- * opérateur disposant de la clé d'administration Convex.
+ *   bunx convex run --prod developer/apps:bootstrapTrustedClient \
+ *     '{"env":"sandbox","name":"…","redirectUris":["…"],"scopes":["openid","profile","email"],"loa":2,"testUsers":["…"]}'
  *
- *   bunx convex run --prod developer/apps:bootstrapTrustedClient '{"name":"…", …}'
- *
- * Le secret n'est retourné qu'ici, une seule fois, et stocké haché comme pour
- * tout client du portail. Pour le renouveler ensuite : `rotateSecret`.
+ * - `env` obligatoire, sans valeur par défaut (CH-820) : `sandbox` pour le
+ *   client de développement (usagers de test obligatoires, http admis sur la
+ *   boucle locale), `production` pour le client de mise en service (https et
+ *   hôte public seulement).
+ * - Plancher de niveau STRICT dans les deux cas : sous `loa`, IDN n'émet ni
+ *   jeton ni claim (lib/assuranceLevel.ts).
+ * - Le secret n'est retourné qu'ici, une seule fois, et stocké haché. Pour le
+ *   renouveler : `rotateTrustedClientSecret`.
  */
 export const bootstrapTrustedClient = internalMutation({
   args: {
+    env: v.union(v.literal("sandbox"), v.literal("production")),
     name: v.string(),
     description: v.optional(v.string()),
     redirectUris: v.array(v.string()),
     scopes: v.array(v.string()),
     loa: v.union(v.literal(1), v.literal(2), v.literal(3)),
+    /** Bac à sable : comptes autorisés à se connecter (au moins un). */
+    testUsers: v.optional(v.array(v.string())),
     /** Développeur propriétaire, si l'app doit rester gérable au portail. */
     ownerUserId: v.optional(v.string()),
   },
@@ -1287,6 +1346,13 @@ export const bootstrapTrustedClient = internalMutation({
     clientSecret: v.string(), // ⚠️ retourné UNE SEULE FOIS
   }),
   handler: async (ctx, args) => {
+    const env = args.env as "sandbox" | "production" | undefined
+    if (env !== "sandbox" && env !== "production") {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: "Environnement requis : « sandbox » ou « production ».",
+      })
+    }
     const name = args.name.trim()
     if (!name || name.length > 120) {
       throw new ConvexError({ code: "INVALID_INPUT", message: "Nom requis (120 caractères maximum)." })
@@ -1297,36 +1363,26 @@ export const bootstrapTrustedClient = internalMutation({
         message: "Entre une et dix redirect URI sont requises.",
       })
     }
-    // Client de production : https obligatoire et pas de fragment. Une URI de
-    // redirection laxiste sur un fournisseur d'identité national ouvre la porte
-    // au vol de code d'autorisation.
-    for (const uri of args.redirectUris) {
-      let parsed: URL
-      try {
-        parsed = new URL(uri)
-      } catch {
-        throw new ConvexError({
-          code: "INVALID_INPUT",
-          message: `Redirect URI invalide : ${uri}`,
-        })
-      }
-      if (parsed.protocol !== "https:") {
-        throw new ConvexError({
-          code: "INVALID_INPUT",
-          message: `Redirect URI non https : ${uri}`,
-        })
-      }
-      if (parsed.hash || parsed.username || parsed.password || /[\s,#]/.test(uri) || uri.length > 2048) {
-        throw new ConvexError({
-          code: "INVALID_INPUT",
-          message: "Redirect URI avec fragment, identifiants ou séparateur interdit.",
-        })
-      }
-    }
+    // Une URI de redirection laxiste sur un fournisseur d'identité national
+    // ouvre la porte au vol de code d'autorisation.
+    for (const uri of args.redirectUris) assertTrustedRedirectUri(uri, env)
 
     const allowedScopes = new Set(["openid", "profile", "email", "offline_access", "idn:civil_status"])
     if (!args.scopes.includes("openid") || args.scopes.some((scope) => !allowedScopes.has(scope))) {
       throw new ConvexError({ code: "INVALID_INPUT", message: "Scope openid requis ; scopes inconnus interdits." })
+    }
+
+    const testUsers = [
+      ...new Set((args.testUsers ?? []).map((email) => email.trim().toLowerCase())),
+    ]
+    if (testUsers.some((email) => !isValidEmail(email)) || testUsers.length > MAX_TEST_USERS) {
+      throw new ConvexError({ code: "INVALID_INPUT", message: "Usager de test : adresse invalide ou liste trop longue." })
+    }
+    if (env === "sandbox" && testUsers.length === 0) {
+      throw new ConvexError({
+        code: "INVALID_INPUT",
+        message: "Bac à sable : au moins un usager de test est requis.",
+      })
     }
 
     // Idempotence : deux applications homonymes seraient indiscernables sur
@@ -1341,27 +1397,26 @@ export const bootstrapTrustedClient = internalMutation({
         code: "ALREADY_EXISTS",
         message:
           `Une application « ${name} » existe déjà (${existing.page[0].clientId ?? "?"}). ` +
-          `Utiliser rotateSecret pour renouveler son secret.`,
+          `Utiliser rotateTrustedClientSecret pour renouveler son secret.`,
       })
     }
 
-    const { clientId, clientSecret: clientSecretPlain } = credentialsForEnv(
-      slugify(name),
-      "production",
-    )
+    const { clientId, clientSecret: clientSecretPlain } = credentialsForEnv(slugify(name), env)
     const clientSecretHash = await hashClientSecret(clientSecretPlain)
     const now = Date.now()
 
     const metadata: AppMetadata = {
-      env: "production",
+      env,
       loa: args.loa,
+      loaEnforcement: "strict",
       description: args.description ?? "",
       scopes: [...new Set(args.scopes)],
       createdBy: args.ownerUserId ?? "",
       services: [],
-      testUsers: [],
-      productionStatus: "approved",
-      status: "production",
+      testUsers: env === "sandbox" ? testUsers : [],
+      ...(env === "production"
+        ? { productionStatus: "approved" as const, status: "production" as const }
+        : { productionStatus: "none" as const }),
     }
 
     const created = (await ctx.runMutation(components.betterAuth.adapter.create, {
@@ -1384,5 +1439,110 @@ export const bootstrapTrustedClient = internalMutation({
     })) as { _id: string }
 
     return { id: created._id, clientId, clientSecret: clientSecretPlain }
+  },
+})
+
+/**
+ * Nouveau secret d'un client d'État amorcé par `bootstrapTrustedClient`
+ * (sans propriétaire développeur : `rotateSecret` du portail ne s'applique
+ * pas). L'ancien secret cesse aussitôt de fonctionner.
+ *
+ *   bunx convex run --prod developer/apps:rotateTrustedClientSecret '{"clientId":"…"}'
+ */
+export const rotateTrustedClientSecret = internalMutation({
+  args: { clientId: v.string() },
+  returns: v.object({ clientId: v.string(), clientSecret: v.string() }),
+  handler: async (ctx, { clientId }) => {
+    const raw = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+      model: MODEL,
+      where: [{ field: "clientId", value: clientId, operator: "eq" }],
+      paginationOpts: { numItems: 1, cursor: null },
+    })) as { page: OAuthAppDoc[] }
+    const doc = raw.page[0]
+    if (!doc) throw new ConvexError({ code: "NOT_FOUND", message: `Client inconnu : ${clientId}` })
+    const meta = parseMetadata(doc.metadata)
+    if (meta.loaEnforcement !== "strict" || meta.createdBy) {
+      throw new ConvexError({
+        code: "FORBIDDEN",
+        message: "Client du portail développeur : son propriétaire renouvelle le secret au portail.",
+      })
+    }
+    const { clientSecret } = credentialsForEnv("x", meta.env)
+    await ctx.runMutation(components.betterAuth.adapter.updateOne, {
+      input: {
+        model: MODEL,
+        where: [{ field: "_id", value: doc._id, operator: "eq" }],
+        update: { clientSecret: await hashClientSecret(clientSecret), updatedAt: Date.now() },
+      },
+    })
+    return { clientId, clientSecret }
+  },
+})
+
+/** Forme des identifiants émis par le portail et par l'amorçage. */
+const PORTAL_CLIENT_ID = /^[a-z0-9-]{1,32}_(sbx|prd)_[A-Za-z0-9_-]{8}$/
+
+/**
+ * Inventaire en lecture seule des clients nés hors des voies prévues (CH-820) :
+ * `/oauth2/register` a été ouvert à toute session, et ses clients portent un
+ * identifiant aléatoire de 32 lettres. Liste aussi les clients sans
+ * propriétaire (amorcés pour l'État, ou orphelins), pour revue.
+ *
+ *   bunx convex run --prod developer/apps:listUnmanagedClients
+ */
+export const listUnmanagedClients = internalQuery({
+  args: {},
+  returns: v.array(
+    v.object({
+      clientId: v.string(),
+      name: v.string(),
+      env: v.string(),
+      strict: v.boolean(),
+      disabled: v.boolean(),
+      redirectUrls: v.string(),
+      createdAt: v.optional(v.number()),
+      reasons: v.array(v.string()),
+    }),
+  ),
+  handler: async (ctx) => {
+    const flagged: Array<{
+      clientId: string
+      name: string
+      env: string
+      strict: boolean
+      disabled: boolean
+      redirectUrls: string
+      createdAt?: number
+      reasons: string[]
+    }> = []
+    let cursor: string | null = null
+    // Une page par appel au composant ; jamais plus de 20 pages (2 000 clients).
+    for (let page = 0; page < 20; page++) {
+      const batch = (await ctx.runQuery(components.betterAuth.adapter.findMany, {
+        model: MODEL,
+        paginationOpts: { numItems: 100, cursor },
+      })) as { page: OAuthAppDoc[]; isDone?: boolean; continueCursor?: string }
+      for (const doc of batch.page) {
+        const meta = parseMetadata(doc.metadata)
+        const clientId = doc.clientId ?? ""
+        const reasons: string[] = []
+        if (!PORTAL_CLIENT_ID.test(clientId)) reasons.push("client_id_hors_portail")
+        if (!meta.createdBy) reasons.push("sans_proprietaire")
+        if (reasons.length === 0) continue
+        flagged.push({
+          clientId,
+          name: doc.name ?? "",
+          env: meta.env,
+          strict: meta.loaEnforcement === "strict",
+          disabled: doc.disabled === true,
+          redirectUrls: doc.redirectUrls ?? "",
+          ...(typeof doc.createdAt === "number" ? { createdAt: doc.createdAt } : {}),
+          reasons,
+        })
+      }
+      if (batch.isDone !== false || !batch.continueCursor) break
+      cursor = batch.continueCursor
+    }
+    return flagged
   },
 })
