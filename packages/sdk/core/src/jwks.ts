@@ -101,10 +101,32 @@ const findKey = async (jwksUri: string, kid: string): Promise<JwkKey | undefined
   return fresh.keys.find((k) => k.kid === kid)
 }
 
+/** Module RSA minimal admis (NIST SP 800-57 : 112 bits de sécurité). */
+const MIN_RSA_MODULUS_BITS = 2048
+
+const rsaModulusBits = (n: string | undefined): number => {
+  if (!n) return 0
+  const bytes = base64UrlDecode(n)
+  let leading = 0
+  while (leading < bytes.length && bytes[leading] === 0) leading++
+  const first = bytes[leading] ?? 0
+  return (bytes.length - leading - 1) * 8 + (first ? Math.floor(Math.log2(first)) + 1 : 0)
+}
+
 const assertKeyMatchesAlg = (jwk: JwkKey, alg: string): void => {
   const expected = KEY_TYPE_FOR_ALG[alg]
   if (!expected || jwk.kty !== expected.kty || (expected.crv && jwk.crv !== expected.crv)) {
     throw new Error(`[@idn-ga/core] Clé JWKS incompatible avec l'alg ${alg}`)
+  }
+  // RS256 : la clé doit annoncer son alg (IDN le publie sur chaque clé) et
+  // un module d'au moins 2048 bits.
+  if (alg === "RS256") {
+    if (jwk.alg === undefined) {
+      throw new Error("[@idn-ga/core] Clé JWKS RS256 publiée sans alg")
+    }
+    if (rsaModulusBits(jwk.n) < MIN_RSA_MODULUS_BITS) {
+      throw new Error(`[@idn-ga/core] Module RSA inférieur à ${MIN_RSA_MODULUS_BITS} bits`)
+    }
   }
   if (jwk.alg !== undefined && jwk.alg !== alg) {
     throw new Error(`[@idn-ga/core] Clé JWKS publiée pour l'alg ${jwk.alg}, jeton en ${alg}`)

@@ -18,11 +18,11 @@ const base64Url = (bytes: Uint8Array): string =>
 
 const encodePart = (value: unknown): string => base64Url(encoder.encode(JSON.stringify(value)))
 
-async function makeKey(kid: string): Promise<SigningKey> {
+async function makeKey(kid: string, modulusLength = 2048): Promise<SigningKey> {
   const pair = await crypto.subtle.generateKey(
     {
       name: "RSASSA-PKCS1-v1_5",
-      modulusLength: 2048,
+      modulusLength,
       publicExponent: new Uint8Array([1, 0, 1]),
       hash: "SHA-256",
     },
@@ -129,6 +129,24 @@ describe("rotation des clés : relecture du JWKS sur kid inconnu", () => {
     published = [jwkOf(keyB), jwkOf(keyA)]
     await expect(verify(await sign(keyB))).resolves.toMatchObject({ header: { kid: "cle-b" } })
     expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it("refuse une clé RS256 publiée sans alg", async () => {
+    const { alg: _alg, ...sansAlg } = jwkOf(keyA)
+    published = [sansAlg as ReturnType<typeof jwkOf>]
+    await expect(verify(await sign(keyA))).rejects.toThrow(/alg/i)
+  })
+
+  it("refuse un module RSA de moins de 2048 bits", async () => {
+    const faible = await makeKey("cle-faible", 1024)
+    published = [jwkOf(faible)]
+    await expect(verify(await sign(faible))).rejects.toThrow(/2048/)
+  })
+
+  it("accepte une clé RSA 3072 (clés de rotation d'IDN)", async () => {
+    const forte = await makeKey("cle-3072", 3072)
+    published = [jwkOf(forte)]
+    await expect(verify(await sign(forte))).resolves.toMatchObject({ header: { kid: "cle-3072" } })
   })
 
   it("refuse une clé publiée pour un autre algorithme que celui du jeton", async () => {
