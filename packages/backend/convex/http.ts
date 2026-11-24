@@ -6,6 +6,8 @@ import { authenticateApiKey } from "./developer/apiKeys"
 import { createAuth } from "./auth"
 import { inbound as inboundMailHandler } from "./iboite/mailHttp"
 import { getPublicJwks } from "./lib/documentSigning"
+import { ANDROID_APK_PATH } from "./mobileApp"
+import { registerPartnerMfaRoutes } from "./partnerMfa/http"
 import { parseDirectoryResolveRequest } from "./partner/resolveRequest"
 import {
   parseAgentActedRequest,
@@ -64,6 +66,24 @@ function authCorsHeaders(origin: string | null): Record<string, string> {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Credentials": "true",
     Vary: "Origin",
+  }
+}
+
+type HttpHandler = Parameters<typeof httpAction>[0]
+
+/**
+ * Ajoute à la réponse les en-têtes CORS des origines de confiance. Le parcours
+ * « Récupérer mon compte » (/claim) du site web appelle les routes
+ * /api/claim/* depuis sa propre origine : sans ces en-têtes le navigateur
+ * bloque la réponse et la recherche échoue en « Failed to fetch ».
+ */
+function withTrustedCors(handler: HttpHandler): HttpHandler {
+  return async (ctx, request) => {
+    const response = await handler(ctx, request)
+    for (const [key, value] of Object.entries(authCorsHeaders(request.headers.get("origin")))) {
+      response.headers.set(key, value)
+    }
+    return response
   }
 }
 
@@ -713,7 +733,7 @@ http.route({
 // POST /api/claim/lookup — recherche publique d'une identité déléguée réclamable.
 // Pas d'auth M2M — appelé par le wizard citoyen.
 // ---------------------------------------------------------------------------
-const claimLookupHandler = httpAction(async (ctx, request) => {
+const claimLookupHandler = httpAction(withTrustedCors(async (ctx, request) => {
   let body: unknown
   try {
     body = await request.json()
@@ -776,7 +796,7 @@ const claimLookupHandler = httpAction(async (ctx, request) => {
     }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   )
-})
+}))
 
 http.route({
   path: "/api/claim/lookup",
@@ -787,7 +807,7 @@ http.route({
 // ---------------------------------------------------------------------------
 // POST /api/claim/complete — finalise la réclamation (password + PIN).
 // ---------------------------------------------------------------------------
-const claimCompleteHandler = httpAction(async (ctx, request) => {
+const claimCompleteHandler = httpAction(withTrustedCors(async (ctx, request) => {
   let body: unknown
   try {
     body = await request.json()
@@ -848,12 +868,24 @@ const claimCompleteHandler = httpAction(async (ctx, request) => {
       headers: { "Content-Type": "application/json" },
     })
   }
-})
+}))
 
 http.route({
   path: "/api/claim/complete",
   method: "POST",
   handler: claimCompleteHandler,
+})
+
+// Préflight du parcours /claim (requêtes JSON depuis l'origine du site web).
+http.route({
+  path: "/api/claim/lookup",
+  method: "OPTIONS",
+  handler: authPreflightHandler,
+})
+http.route({
+  path: "/api/claim/complete",
+  method: "OPTIONS",
+  handler: authPreflightHandler,
 })
 
 // GET /.well-known/document-signing-jwks.json — clé publique RS256 dédiée
@@ -1535,5 +1567,32 @@ http.route({
     }
   }),
 })
+
+// GET /downloads/identite-android.apk — lien STABLE vers le dernier APK publié.
+// Une réponse d'action HTTP est plafonnée à 20 Mo : on redirige vers le
+// stockage au lieu de servir le fichier. Publication : convex/mobileApp.ts.
+http.route({
+  path: ANDROID_APK_PATH,
+  method: "GET",
+  handler: httpAction(async (ctx) => {
+    const build = await ctx.runQuery(internal.mobileApp.latest, {})
+    const url = build ? await ctx.storage.getUrl(build.storageId) : null
+    if (!build || !url) {
+      return new Response("Aucune version Android publiée.", { status: 404 })
+    }
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: url,
+        // Le lien doit suivre chaque publication : pas de redirection en cache.
+        "Cache-Control": "no-store",
+        "X-App-Version": `${build.version} (${build.buildNumber})`,
+      },
+    })
+  }),
+})
+
+// Confirmation de connexion pour les partenaires (ADR-0007 §6).
+registerPartnerMfaRoutes(http)
 
 export default http

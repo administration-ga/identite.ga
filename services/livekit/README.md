@@ -1,5 +1,10 @@
 # LiveKit — entretiens vidéo Niveau 3
 
+> Depuis le 9 septembre 2026, la production utilise le LiveKit de la Freebox,
+> partagé avec Gabon Diplomatie. Voir [le compte rendu de migration](../vercel-migration-2026-09-09.md).
+> La configuration Google Cloud ci-dessous est historique ; ne pas relancer
+> son workflow de déploiement pour la production actuelle.
+
 Serveur LiveKit auto-hébergé pour le parcours Niveau 3 d'Identité.ga. Le MVP
 met en relation un citoyen Niveau 2 et un Contrôleur d'Identité. Le contrôleur
 réalise l'entretien en direct et prend manuellement la décision finale.
