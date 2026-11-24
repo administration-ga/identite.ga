@@ -8,7 +8,7 @@ Deux mécanismes complémentaires :
 
 | Besoin | Mécanisme | Mise à jour |
 |--------|-----------|-------------|
-| Niveau de vérification courant | Claims OIDC `loa` / `acr` (userinfo) | figé au login |
+| Niveau de vérification courant | Claims OIDC `acr` / `loa` (ID token et userinfo) | figé au login |
 | État d'une demande en cours / action requise | Endpoint `/oauth2/verification` | temps réel (polling) |
 | Déclencher une vérification | Authorize avec `acr_values` (step-up) | — |
 
@@ -20,13 +20,19 @@ Deux mécanismes complémentaires :
 
 ## 1. Lire le niveau de vérification (claims)
 
-Le niveau est exposé sous le scope **`profile`**, dans la réponse de
-**`/oauth2/userinfo`** (et non dans l'id_token) :
+Depuis CH-820 (24/11/2026), le niveau part **toujours** dans l'**ID token** et
+dans la réponse de **`/oauth2/userinfo`**, quels que soient les scopes
+demandés :
 
 | Claim | Type | Valeurs |
 |-------|------|---------|
-| `loa` | number | `1` (email seul) · `2` / `3` (identité vérifiée) |
-| `acr` | string | `eidas1` · `eidas2` · `eidas3` |
+| `acr` | string | `eidas1` · `eidas2` · `eidas3` · `"0"` (compte sans profil) |
+| `loa` | number | `1` (email seul) · `2` / `3` (identité vérifiée) · `0` (sans profil) |
+
+**Vérifiez `acr` vous-même** contre le niveau que vous avez demandé en
+`acr_values` : IDN émet le niveau réel du compte, `acr_values` reste une
+demande. Avec le SDK : `verifyIdToken(token, { …, minLevel: 2 })`, ou le client
+`createIDNClient({ acrValues: ["eidas2"] })`, qui revérifie au retour.
 
 ```jsonc
 // GET /oauth2/userinfo  (Authorization: Bearer <access_token>)
@@ -128,6 +134,12 @@ GET /api/auth/oauth2/authorize
 > Alternative statique : l'app peut déclarer un `loa` minimum dans ses
 > metadata (portail développeur). Le step-up sera alors exigé à chaque
 > connexion sans passer `acr_values`.
+>
+> **Applications de l'État (plancher strict)** : un client amorcé par
+> `bootstrapTrustedClient` porte `loaEnforcement: "strict"`. Sous son minimum,
+> IDN n'émet **aucun** jeton : `/oauth2/token`, `/oauth2/userinfo` et l'échange
+> partenaire répondent `403` `{"error":"access_denied","error_description":"unmet_authentication_requirements: eidas2 requis"}`,
+> revue manuelle en cours comprise. Voir `docs/adr/0002-signature-rs256-et-rotation-des-cles.md`.
 
 ---
 

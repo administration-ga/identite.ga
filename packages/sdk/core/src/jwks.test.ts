@@ -132,7 +132,8 @@ describe("rotation des clés : relecture du JWKS sur kid inconnu", () => {
   })
 
   it("refuse une clé RS256 publiée sans alg", async () => {
-    const { alg: _alg, ...sansAlg } = jwkOf(keyA)
+    const sansAlg: Partial<ReturnType<typeof jwkOf>> = { ...jwkOf(keyA) }
+    delete sansAlg.alg
     published = [sansAlg as ReturnType<typeof jwkOf>]
     await expect(verify(await sign(keyA))).rejects.toThrow(/alg/i)
   })
