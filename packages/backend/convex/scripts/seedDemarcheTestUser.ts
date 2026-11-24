@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values"
 
 import { components, internal } from "../_generated/api"
-import { action, internalMutation } from "../_generated/server"
+import { internalAction, internalMutation } from "../_generated/server"
 import { authComponent, createAuth } from "../auth"
 import { generateIdnId } from "../lib/idnId"
 import { derivePivotKeys } from "../lib/identity"
@@ -99,7 +99,11 @@ const hashClientSecret = async (secret: string): Promise<string> => {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
 }
 
-export const run = action({
+// Interne (CH-820) : la fonction était publique, donc appelable par tout
+// client du déploiement ; la garde `CONVEX_DEPLOYMENT` ci-dessous ne protège
+// rien, Convex ne posant pas cette variable dans les fonctions. Seul
+// `convex run`, avec la clé d'administration, peut désormais l'appeler.
+export const run = internalAction({
   args: {},
   returns: v.object({
     userId: v.string(),

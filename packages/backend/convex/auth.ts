@@ -50,6 +50,18 @@ import {
   handleSignInTwoFactorGate,
   requiresTwoFactorChallenge,
 } from "./lib/twoFactorGate"
+import {
+  accountLevel,
+  acrForLevel,
+  assertAssuranceLevel,
+  clientLevelPolicy,
+  sandboxAccessDenied,
+} from "./lib/assuranceLevel"
+import {
+  DYNAMIC_REGISTRATION_PATH,
+  refuseDynamicRegistration,
+} from "./lib/oidcIssuanceGuards"
+import { readSigningKeys, SIGNING_KEY_PAIR_CONFIG } from "./lib/signingKeys"
 
 const isDev = process.env.NODE_ENV !== "production"
 
@@ -145,14 +157,33 @@ export const createAuth = (
         !list.includes(email) &&
         (ownerId === null || userId !== ownerId)
       ) {
-        throw new Error("sandbox_access_denied")
+        // 403 access_denied au lieu d'une erreur serveur (500).
+        sandboxAccessDenied()
       }
     }
-    // Scopes fournis par le jeton validé, jamais par une query utilisateur.
-    const profile: UserinfoProfile | null = scopes.some((scope) =>
-      scope === "profile" || scope === "idn:civil_status",
-    ) ? await ctx.runQuery(internal.profile.getForUserinfo, { userId: user.id }) : null
-    return { env, ...userinfoClaimsForScopes(scopes, profile) }
+    // Le profil est toujours lu : il porte le niveau du compte, contrôlé à
+    // chaque émission (jeton, userinfo, échange partenaire). Les claims
+    // d'identité, eux, restent filtrés par les scopes du jeton validé.
+    const profile: UserinfoProfile | null = await ctx.runQuery(
+      internal.profile.getForUserinfo,
+      { userId: user.id },
+    )
+    const level = accountLevel(profile)
+    // Plancher des seuls clients stricts (applications de l'État) ; les
+    // autres reçoivent le niveau réel et vérifient `acr` eux-mêmes.
+    const policy = clientLevelPolicy(client.metadata)
+    if (policy.strict) assertAssuranceLevel(level, policy.minimum)
+    return {
+      env,
+      ...userinfoClaimsForScopes(scopes, profile),
+      // Après les claims de scope : `acr` remplace la valeur fixe de Better
+      // Auth (« urn:mace:incommon:iap:silver ») même sans le scope `profile`.
+      acr: acrForLevel(level),
+      loa: level,
+      // Better Auth calculerait `auth_time` en millisecondes s'il voyait une
+      // session au point de jeton ; il n'est pas émis tant qu'il n'est pas juste.
+      auth_time: undefined,
+    }
   }
 
   return betterAuth({
@@ -281,6 +312,12 @@ export const createAuth = (
       useSecureCookies: isDev ? false : undefined,
     },
     hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        // Inscription dynamique fermée à tous (CH-820) : sessions ordinaires
+        // comprises. Le portail développeur et l'approbation d'un
+        // administrateur sont les seules voies de création d'un client.
+        if (ctx.path === DYNAMIC_REGISTRATION_PATH) refuseDynamicRegistration()
+      }),
       // Gate 2FA générique pour TOUS les endpoints /sign-in/* — deux failles
       // corrigées ici :
       //
@@ -509,8 +546,12 @@ export const createAuth = (
       }),
 
       // Émission ID tokens RS256 + JWKS publique (§6.1)
+      // Lecture des clés normalisée (dates en `Date`) : sans elle, dès deux
+      // clés en base (rotation), `/oauth2/token` levait une TypeError (500).
+      // Les clés créées par rotation sont RSA 3072 (lib/signingKeys.ts).
       jwt({
-        jwks: { keyPairConfig: { alg: "RS256", modulusLength: 2048 } },
+        jwks: { keyPairConfig: SIGNING_KEY_PAIR_CONFIG },
+        adapter: { getJwks: readSigningKeys },
       }),
 
       // Plugin requis par @convex-dev/better-auth pour exposer l'auth à

@@ -73,4 +73,14 @@ crons.interval(
   {},
 )
 
+// Clés de signature (CH-820, ADR 0002) : purge quotidienne des clés
+// remplacées depuis plus de 7 jours ; rotation à 90 jours seulement si le
+// propriétaire a posé IDN_JWKS_AUTO_ROTATION=enabled.
+crons.interval(
+  "JWKS rotation tick",
+  { hours: 24 },
+  internal.jwksRotation.tick,
+  {},
+)
+
 export default crons

@@ -1,6 +1,6 @@
 import { fetchDiscovery } from "./discovery.js"
 import { EventBus } from "./events.js"
-import { verifyIdToken } from "./jwks.js"
+import { levelOfAcr, verifyIdToken } from "./jwks.js"
 import { challengeS256, generateVerifier, randomString } from "./pkce.js"
 import { resolveStorage, storageKeys } from "./storage.js"
 import {
@@ -35,6 +35,14 @@ interface PendingFlow {
   nonce: string
   redirectUri: string
   scopes: string[]
+  /** Niveau minimal exigé par cette connexion (plus bas des `acr_values`). */
+  minLevel?: 1 | 2 | 3
+}
+
+/** Plus bas niveau parmi des `acr_values` reconnus ; aucun si la liste est vide. */
+const minLevelOf = (acrValues: readonly string[] | undefined): 1 | 2 | 3 | undefined => {
+  const levels = (acrValues ?? []).map(levelOfAcr).filter((l): l is 1 | 2 | 3 => l > 0)
+  return levels.length > 0 ? (Math.min(...levels) as 1 | 2 | 3) : undefined
 }
 
 export class IDNClient {
@@ -76,6 +84,7 @@ export class IDNClient {
     const state = randomString()
     const nonce = randomString()
     const scopes = opts.scopes ?? this.scopes
+    const acrValues = opts.acrValues ?? this.acrValues
 
     const pending: PendingFlow = {
       codeVerifier,
@@ -83,6 +92,7 @@ export class IDNClient {
       nonce,
       redirectUri: this.redirectUri,
       scopes,
+      minLevel: minLevelOf(acrValues),
     }
     await this.storage.set(this.keys.pkce, JSON.stringify(pending))
 
@@ -95,7 +105,6 @@ export class IDNClient {
     url.searchParams.set("nonce", nonce)
     url.searchParams.set("code_challenge", codeChallenge)
     url.searchParams.set("code_challenge_method", "S256")
-    const acrValues = opts.acrValues ?? this.acrValues
     if (acrValues && acrValues.length > 0) {
       url.searchParams.set("acr_values", acrValues.join(" "))
     }
@@ -156,6 +165,8 @@ export class IDNClient {
       audience: this.clientId,
       jwksUri: discovery.jwks_uri,
       nonce: pending.nonce,
+      // Le niveau demandé en `acr_values` est revérifié sur le jeton reçu.
+      minLevel: pending.minLevel,
     })
 
     const user = await fetchUserInfo(discovery, tokens.accessToken)

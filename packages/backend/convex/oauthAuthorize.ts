@@ -2,6 +2,7 @@ import { v } from "convex/values"
 
 import { components } from "./_generated/api"
 import { query } from "./_generated/server"
+import { clientLevelPolicy } from "./lib/assuranceLevel"
 import { getCurrentAuthUser } from "./lib/auth"
 
 /**
@@ -69,6 +70,9 @@ export const getAppForConsent = query({
       redirectUris: v.array(v.string()),
       requestedScopes: v.array(v.string()),
       requiredLoA: v.union(v.literal(1), v.literal(2), v.literal(3)),
+      // Client strict (CH-820) : sous `requiredLoA`, IDN n'émet aucun jeton ;
+      // l'écran ne propose donc pas de continuer, même vérification en cours.
+      strictLoA: v.boolean(),
       env: v.union(v.literal("sandbox"), v.literal("production")),
       // En sandbox : true si l'email du user est dans `testUsers` ou si le user
       // est le propriétaire de l'app. En prod : toujours true.
@@ -93,6 +97,9 @@ export const getAppForConsent = query({
     if (!doc || doc.disabled) return null
 
     const meta = parseMetadata(doc.metadata)
+    // Même lecture que l'émission (lib/assuranceLevel.ts) : l'écran affiche
+    // le plancher qui sera appliqué.
+    const policy = clientLevelPolicy(doc.metadata)
     const env: "sandbox" | "production" =
       meta.env === "production" ? "production" : "sandbox"
 
@@ -111,7 +118,8 @@ export const getAppForConsent = query({
       icon: doc.icon ?? null,
       redirectUris: parseRedirectUrls(doc.redirectUrls),
       requestedScopes: meta.scopes ?? ["openid", "profile", "email"],
-      requiredLoA: (meta.loa ?? 1) as 1 | 2 | 3,
+      requiredLoA: policy.minimum,
+      strictLoA: policy.strict,
       env,
       userAllowed,
     }

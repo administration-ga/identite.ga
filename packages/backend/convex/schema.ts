@@ -220,6 +220,10 @@ export const AUDIT_ACTIONS = [
   "partner_mfa_link_created",
   "partner_mfa_link_revoked",
   "partner_mfa_request_decided",
+  // Rotation des clés de signature (CH-820, convex/jwksRotation.ts)
+  "jwks_key_rotated",
+  "jwks_key_pruned",
+  "jwks_key_revoked",
 ] as const
 
 export const AUDIT_TARGET_TYPES = [
