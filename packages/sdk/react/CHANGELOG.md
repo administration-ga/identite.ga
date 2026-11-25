@@ -1,5 +1,12 @@
 # @idn-ga/react
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [[`dd9b42c`](https://github.com/administration-ga/identite.ga/commit/dd9b42cb4ce2d4308ed63b8f42caa4edecfed428)]:
+  - @idn-ga/core@0.3.0
+
 ## 0.1.2
 
 ### Patch Changes

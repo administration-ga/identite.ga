@@ -1,5 +1,11 @@
 # @idn-ga/core
 
+## 0.3.0
+
+### Minor Changes
+
+- [#21](https://github.com/administration-ga/identite.ga/pull/21) [`dd9b42c`](https://github.com/administration-ga/identite.ga/commit/dd9b42cb4ce2d4308ed63b8f42caa4edecfed428) Thanks [@administration-ga](https://github.com/administration-ga)! - `verifyIdToken` suit la rotation des clés d'IDN : sur un `kid` inconnu, le JWKS est relu (une fois par fenêtre de 30 s), sans jamais retomber sur une autre clé. Un ID token sans `kid`, ou dont la clé publiée ne correspond pas à l'algorithme, est refusé. Nouvelle option `minLevel` (1, 2 ou 3) contrôlée sur la revendication `acr` (`eidas1`…`eidas3`) ; le client OIDC revérifie au retour le niveau demandé en `acr_values`. `levelOfAcr` est exporté.
+
 ## 0.2.0
 
 ### Minor Changes
