@@ -56,8 +56,9 @@ npx convex run --deployment flexible-panda-248 partnerLevel/attestations:operato
 - Fermer la capacité **ne retire pas** les attestations déjà enregistrées : elles restent
   actives, avec leur verrou d'état civil, et le client ne peut plus ni attester ni retirer.
 - `operatorWithdraw` lève ces attestations, que la capacité soit encore ouverte ou déjà fermée.
-  Il applique la même règle que le retrait du partenaire, avec les mêmes écritures, le même
-  journal (l'opérateur y est inscrit) et les mêmes notifications. Il traite une page par appel et
+  Il applique la même règle que le retrait du partenaire, avec les mêmes écritures et le même
+  journal (l'opérateur y est inscrit). La notification dit que le retrait vient d'identite.ga,
+  pas du partenaire. Il traite une page par appel (100 attestations au plus) et
   rend `{ withdrawn, kept, continueCursor, isDone }` : relancer avec `continueCursor` jusqu'à
   `isDone`. Une seconde passe ne trouve plus rien.
 - Revue : `partnerLevel/attestations:listAttested`
@@ -151,14 +152,17 @@ Corps `{ error, message, reason? }`.
 | 422 | `not_eligible` | `reason` : `profile_incomplete` (nom, prénom, date de naissance ou nationalité manquant), `profile_type` (compte autre que citoyen), `nationality` (nationalité enregistrée autre que gabonaise : admis `GA`, `GAB`, `GABON`, `GABONAIS`, `GABONAISE`, `GABONESE`, sans tenir compte de la casse, des espaces et des accents), `account_closing` (suppression du compte demandée) |
 | 429 | `rate_limited` | Plus de 120 appels par minute pour ce client (attestations et retraits confondus). En-tête `Retry-After` en secondes. |
 
-Ordre des contrôles à l'attestation : authentification, capacité, plafond, sujet, consentement,
-attestation déjà active, éligibilité (type de compte, fermeture, profil complet, nationalité),
-revue humaine (KYC, doublon), fraîcheur de l'identité, niveau.
+Ordre des contrôles à l'attestation : authentification, capacité, plafond, sujet, attestation
+déjà active (`already_attested`, même si le consentement a été retiré depuis : une attestation
+active prouve un consentement passé, et le partenaire doit savoir qu'IDN la tient toujours),
+consentement, éligibilité (type de compte, fermeture, profil complet, nationalité), revue
+humaine (KYC, doublon), fraîcheur de l'identité, niveau.
 
 ## Ce que l'attestation change pour la personne
 
 - **Notification** (catégorie vérification) : « Votre identité passe au Niveau 2 », ou au
-  retrait « Votre identité revient au Niveau 1 ». Le texte nomme le partenaire.
+  retrait « Votre identité revient au Niveau 1 ». Le texte nomme le partenaire, et dit si le
+  retrait vient de lui ou d'identite.ga.
 - **État civil verrouillé** tant qu'une attestation est active : nom, prénoms, date de naissance,
   nationalité et NIP ne se modifient plus depuis l'espace de la personne, et le compte reste un
   compte de citoyen (code `IDENTITY_LOCKED`). Une correction passe par le consulat ou le support.

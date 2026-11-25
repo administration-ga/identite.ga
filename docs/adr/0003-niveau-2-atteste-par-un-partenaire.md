@@ -102,8 +102,16 @@ Acceptées ou reportées après la revue de sécurité du 25/11/2026 :
 - **Retirer son consentement ne lève pas le verrou d'état civil.** Le verrou suit l'attestation,
   pas le consentement ; le partenaire ou l'opérateur la retire.
 - **La date de naissance n'est pas comparée par le partenaire aujourd'hui** : consulat.ga ne
-  demande pas le scope `idn:civil_status`, qui porte `birthdate`. Sa comparaison porte sur les
-  noms et prénoms ; IDN verrouille et date néanmoins la date de naissance.
+  demande pas le scope `idn:civil_status`, qui porte `birthdate`. Sa comparaison porte sur le
+  NOM de famille et le PREMIER prénom seulement. IDN verrouille la date de naissance une fois
+  l'attestation active, mais ne la protège pas avant : une personne peut la modifier, se
+  reconnecter chez le partenaire (qui ne la voit pas) et être attestée avec cette date. Fermer
+  cette limite demande que le partenaire lise `idn:civil_status` et compare la date.
+- **Deux horloges** : `identityReadAt` est pris à l'horloge du partenaire, `pivotUpdatedAt` à
+  celle d'IDN, sans marge (une marge rouvrirait la fenêtre que le contrôle ferme). Les deux
+  services doivent rester à l'heure. Un refus `identity_stale` ne se lève qu'à la prochaine
+  connexion de la personne chez le partenaire : publier IDN et le partenaire le même jour, IDN
+  d'abord, pour qu'aucun inscrit ne reste entre deux versions.
 - **`identityReadAt` est déclaratif** : IDN croit le partenaire sur l'heure de sa lecture. La
   règle protège un partenaire de bonne foi contre une copie périmée, pas contre un partenaire
   qui mentirait.

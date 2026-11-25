@@ -860,6 +860,24 @@ describe("retrait sans attestation connue (revue D)", () => {
       loa: 1,
     })
   })
+
+  test("un rejeu après retrait du consentement répond already_attested, pas not_linked", async () => {
+    const t = makeT()
+    await readyCitizen(t)
+    await attest(t, "citizen_a")
+    await revokeConsent(t, "citizen_a")
+
+    // Une attestation active prouve un consentement passé. Le partenaire dont
+    // la première réponse s'est perdue doit apprendre qu'IDN tient toujours
+    // l'attestation : un `not_linked` lui ferait croire qu'il n'y a rien à
+    // retirer (contre-revue de sécurité, N1).
+    expect(await attest(t, "citizen_a")).toMatchObject({
+      ok: true,
+      outcome: "already_attested",
+      loa: 2,
+    })
+    expect(await attestationsOf(t, "citizen_a")).toMatchObject([{ status: "active" }])
+  })
 })
 
 describe("retrait par l'opérateur (revue G)", () => {
@@ -911,6 +929,10 @@ describe("retrait par l'opérateur (revue G)", () => {
     }
     // Seul le compte redescendu est prévenu une seconde fois.
     expect(await notificationsOf(t, "releve")).toHaveLength(2)
+    // Le message dit qui a retiré : identite.ga, pas le partenaire (N4).
+    const texts = (await notificationsOf(t, "releve")).map((n) => n.body)
+    expect(texts.some((text) => text.includes("a été retirée par identite.ga"))).toBe(true)
+    expect(texts.some((text) => text.includes("a retiré la confirmation"))).toBe(false)
     expect(await notificationsOf(t, "kyc_approuve")).toHaveLength(1)
   })
 

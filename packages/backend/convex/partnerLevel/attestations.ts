@@ -75,6 +75,9 @@ const UNKNOWN_SUBJECT = v.object({
 })
 const NOT_LINKED = v.object({ ok: v.literal(false), error: v.literal("not_linked") })
 
+/** Attestations traitées au plus par appel de `operatorWithdraw`. */
+const OPERATOR_WITHDRAW_PAGE_MAX = 100
+
 /** Ce que dit la notification, selon le fait attesté. */
 const FACT_LABEL: Record<AttestationKind, string> = {
   consular_registration: "votre inscription consulaire",
@@ -185,6 +188,8 @@ async function applyWithdrawal(
     clientName: string
     /** Ajouts au journal (opérateur, par exemple). */
     auditExtra?: Record<string, string>
+    /** Retrait décidé par identite.ga, et non par le partenaire. */
+    byOperator?: boolean
   },
 ): Promise<void> {
   const { active, profile, decision, others } = input
@@ -237,7 +242,12 @@ async function applyWithdrawal(
       userId: active.userId,
       category: "kyc",
       title: `Votre identité revient au Niveau ${decision.loa}`,
-      body: `${input.clientName} a retiré la confirmation de ${FACT_LABEL[active.kind]}. Votre identité numérique revient au Niveau ${decision.loa}. Vous pouvez faire vérifier votre identité depuis votre espace pour retrouver le Niveau 2.`,
+      // Le message dit QUI a retiré : le partenaire, ou identite.ga elle-même.
+      body: `${
+        input.byOperator
+          ? `La confirmation de ${FACT_LABEL[active.kind]} apportée par ${input.clientName} a été retirée par identite.ga.`
+          : `${input.clientName} a retiré la confirmation de ${FACT_LABEL[active.kind]}.`
+      } Votre identité numérique revient au Niveau ${decision.loa}. Vous pouvez faire vérifier votre identité depuis votre espace pour retrouver le Niveau 2.`,
       metadata: { kind: "level_attestation_withdrawn", clientId: active.clientId },
       sendEmail: true,
       pushUrl: "/kyc",
@@ -312,14 +322,22 @@ export const attest = internalMutation({
     }
     const userId = profile.userId
 
+    const row = await attestationRowOf(ctx, args.clientId, args.kind, userId)
+
     // Le partenaire n'atteste que pour une personne qui lui a donné son
     // consentement : il ne peut pas viser un compte qu'il ne connaît pas.
-    if (!(await hasRecordedConsent(ctx, userId, args.clientId))) {
+    // Une attestation DÉJÀ ACTIVE prouve un consentement passé : le rejeu
+    // répond alors `already_attested`, même consentement retiré depuis. Sans
+    // cela, un partenaire dont la première réponse s'est perdue recevrait
+    // `not_linked`, croirait qu'IDN ne tient rien et ne retirerait jamais.
+    if (
+      row?.status !== "active" &&
+      !(await hasRecordedConsent(ctx, userId, args.clientId))
+    ) {
       await recordRefusal(ctx, args, "attest", userId, { error: "not_linked" })
       return { ok: false as const, error: "not_linked" as const }
     }
 
-    const row = await attestationRowOf(ctx, args.clientId, args.kind, userId)
     const decision = decideAttestation({
       kind: args.kind,
       loa: profile.loa,
@@ -694,7 +712,10 @@ export const operatorWithdraw = internalMutation({
       .withIndex("by_clientId_and_kind_and_status", (q) =>
         q.eq("clientId", args.clientId).eq("kind", args.kind).eq("status", "active"),
       )
-      .paginate(args.paginationOpts)
+      .paginate({
+        ...args.paginationOpts,
+        numItems: Math.min(Math.max(1, args.paginationOpts.numItems), OPERATOR_WITHDRAW_PAGE_MAX),
+      })
 
     let withdrawn = 0
     let kept = 0
@@ -711,6 +732,7 @@ export const operatorWithdraw = internalMutation({
         others,
         clientName,
         auditExtra: { by: "operator", operator },
+        byOperator: true,
       })
       if (decision.outcome === "withdrawn") withdrawn++
       else kept++
