@@ -61,6 +61,9 @@ export const AUDIT_CATEGORIES = {
     "level3_rejected",
     "level3_cancelled",
     "level3_appointment_cancelled",
+    "level_attested",
+    "level_attestation_withdrawn",
+    "level_attestation_refused",
   ],
   apps: [
     "consent_granted",

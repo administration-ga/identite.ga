@@ -80,6 +80,9 @@ export const ACTION_LABEL: Record<string, string> = {
   level3_rejected: "Niveau 3 refusé",
   level3_cancelled: "Demande Niveau 3 annulée",
   level3_appointment_cancelled: "Rendez-vous Niveau 3 annulé",
+  level_attested: "Niveau 2 attesté par un partenaire",
+  level_attestation_withdrawn: "Attestation de niveau retirée",
+  level_attestation_refused: "Attestation de niveau refusée",
   consent_granted: "Consentement accordé",
   consent_revoked: "Consentement retiré",
   oauth_app_created: "Application créée",
@@ -115,6 +118,8 @@ const ADMIN_KIND_LABEL: Record<string, string> = {
   data_export_requested: "Export de données demandé",
   deletion_cancelled: "Suppression annulée",
   embedded_signup_orphan_deleted: "Inscription orpheline nettoyée",
+  partner_level_capability_granted: "Capacité d'attester un niveau ouverte",
+  partner_level_capability_revoked: "Capacité d'attester un niveau fermée",
 }
 
 export type AuditCategory =
@@ -181,7 +186,9 @@ export function eventTone(action: string): Tone {
     action === "role_revoked" ||
     action === "oauth_app_disabled" ||
     action === "duplicate_flagged" ||
-    action === "consent_revoked"
+    action === "consent_revoked" ||
+    action === "level_attestation_withdrawn" ||
+    action === "level_attestation_refused"
   )
     return "yellow"
   return "neutral"

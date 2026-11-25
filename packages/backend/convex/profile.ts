@@ -9,6 +9,10 @@ import {
 import { assessIdentityCollision } from "./lib/duplicateGuard"
 import { raiseDuplicateFlags } from "./lib/duplicateFlags"
 import { derivePivotKeys, normalizeNipKey } from "./lib/identity"
+import {
+  assertCivilStatusEditable,
+  assertNipReplaceable,
+} from "./partnerLevel/identityLock"
 import { internal } from "./_generated/api"
 
 /**
@@ -189,6 +193,16 @@ export const updatePivot = mutation({
       })
     }
 
+    // Identité attestée par un partenaire (inscription consulaire) : nom,
+    // prénoms, date de naissance et nationalité verrouillés tant que
+    // l'attestation est active. Inerte sans attestation (ADR 0003).
+    await assertCivilStatusEditable(ctx, user.userId, profile.pivot, {
+      firstName: args.firstName,
+      lastName: args.lastName,
+      dateOfBirth: args.dateOfBirth,
+      nationality: args.nationality,
+    })
+
     // Préserve les champs non touchés par updatePivot (phone, nip).
     const existingPhone = profile.pivot?.phone
     const existingNip = profile.pivot?.nip
@@ -283,6 +297,10 @@ export const updateNip = mutation({
         message: "Identité pivot introuvable.",
       })
     }
+
+    // Sous attestation active, un NIP existant ne se remplace pas (ajouter un
+    // premier NIP reste permis). Inerte sans attestation (ADR 0003).
+    await assertNipReplaceable(ctx, user.userId, profile.pivot.nip, nip)
 
     const nipKey = normalizeNipKey(nip)
     const collision = await assessIdentityCollision(ctx, {

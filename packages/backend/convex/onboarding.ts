@@ -19,6 +19,10 @@ import {
 } from "./lib/incompleteSignup"
 import { generateIdnId } from "./lib/idnId"
 import { derivePinHash, PIN_REGEX } from "./lib/pin"
+import {
+  assertCivilStatusEditable,
+  assertNipReplaceable,
+} from "./partnerLevel/identityLock"
 import { PROFILE_TYPES } from "./schema"
 
 /**
@@ -120,6 +124,16 @@ export const setIdentityPivot = mutation({
           "Le NIP doit contenir exactement 14 caractères (chiffres ou lettres).",
       })
     }
+    // Ce chemin réécrit tout le pivot d'un profil existant : sans le verrou de
+    // `profile.updatePivot`, il le contournerait. Inerte sans attestation
+    // active (ADR 0003).
+    await assertCivilStatusEditable(ctx, user.userId, profile.pivot, {
+      firstName: args.firstName,
+      lastName: args.lastName,
+      dateOfBirth: args.dateOfBirth,
+      nationality: args.nationality,
+    })
+    await assertNipReplaceable(ctx, user.userId, profile.pivot?.nip, nipTrim)
     // Même garde qu'à `completeSignup` : ce chemin écrit le pivot lui aussi, et
     // un contrôle posé sur un seul des deux se contournerait par l'autre.
     const { pivotKey, nipKey, phoneKey } = derivePivotKeys({

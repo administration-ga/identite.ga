@@ -3,6 +3,7 @@ import { ConvexError } from "convex/values";
 import { internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx } from "../_generated/server";
+import { documentaryLoa } from "../verification/documentProof";
 
 /**
  * Décision d'un entretien Niveau 3 — implémentation UNIQUE.
@@ -143,7 +144,13 @@ export async function applyLevel3Decision(
     .query("userProfile")
     .withIndex("by_userId", (q) => q.eq("userId", verification.userId))
     .unique();
-  const entryLoa = profile?.loa ?? 1;
+  // Niveau de PREUVE à l'entrée : un Niveau 2 attesté seulement par un
+  // partenaire n'a aucune pièce examinée, sa piste documentaire doit donc être
+  // constatée ici comme pour un Niveau 1 (cf. `verification/documentProof.ts`,
+  // ADR 0003). Égal au niveau détenu pour tout compte sans attestation.
+  const entryLoa = profile
+    ? await documentaryLoa(ctx, verification.userId, profile.loa)
+    : 1;
 
   if (input.decision === "rejected") {
     const reason = (input.reason ?? "").trim();

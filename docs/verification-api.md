@@ -164,3 +164,19 @@ await client.requestIdentityVerification(3)       // niveau 3
 
 Le niveau est aussi disponible directement sur l'utilisateur de session
 (`session.user.loa` / `.acr`), figé au login — voir la nuance section 1.
+
+---
+
+## 5. Niveau 2 attesté par un partenaire
+
+Depuis le 25/11/2026, un Niveau 2 peut aussi venir d'une **attestation** : un partenaire
+habilité (consulat.ga) atteste qu'un ressortissant a ouvert son inscription consulaire, et
+identite.ga relève lui-même le compte au Niveau 2. Contrat partenaire :
+`docs/level-attestation-api.md` ; décision : `docs/adr/0003-niveau-2-atteste-par-un-partenaire.md`.
+
+Pour une application relying party, rien ne change dans le protocole : `loa: 2` et
+`acr: eidas2` dans le jeton et dans `/oauth2/userinfo`, `verified: true` et `status: approved`
+sur `/oauth2/verification`. Les deux origines du Niveau 2 (pièces examinées ou attestation) se
+distinguent dans la base d'identite.ga, **pas dans les jetons**. Une application qui exige que
+les pièces aient été examinées par identite.ga garde son propre contrôle (habilitation propre,
+ou demande du Niveau 3, qui exige toujours des pièces examinées).

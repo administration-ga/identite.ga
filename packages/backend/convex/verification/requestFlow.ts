@@ -5,6 +5,7 @@ import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { rateLimiter } from "../rateLimiter";
 import type { KYC_DOCUMENT_TYPES } from "../schema";
+import { documentaryLoa } from "./documentProof";
 import {
   isKycResumable,
   isLevel3Active,
@@ -12,6 +13,7 @@ import {
   planVerificationRequest,
   type DocumentTrackStatus,
   type TargetLoa,
+  type VerificationRequestPlan,
 } from "./requestPolicy";
 
 /**
@@ -109,12 +111,20 @@ export async function openVerificationRequest(
   const kyc = await latestKycRow(ctx, input.userId);
   const level3 = await activeLevel3Row(ctx, input.userId);
 
-  const plan = planVerificationRequest({
-    targetLoa: input.targetLoa,
-    currentLoa: profile.loa,
-    activeKyc: kyc ? { status: kyc.status as DocumentTrackStatus } : null,
-    hasActiveLevel3: level3 !== null,
-  });
+  // Le niveau DÉTENU décide de « déjà vérifié » ; le niveau de PREUVE
+  // décide de la piste documentaire. Ils ne diffèrent que pour un Niveau 2
+  // attesté seulement par un partenaire, qui passe alors par les pièces comme
+  // un Niveau 1 (cf. `documentProof.ts`, ADR 0003).
+  const proofLoa = await documentaryLoa(ctx, input.userId, profile.loa);
+  const plan: VerificationRequestPlan =
+    profile.loa >= input.targetLoa
+      ? { kind: "already_verified" }
+      : planVerificationRequest({
+          targetLoa: input.targetLoa,
+          currentLoa: proofLoa,
+          activeKyc: kyc ? { status: kyc.status as DocumentTrackStatus } : null,
+          hasActiveLevel3: level3 !== null,
+        });
 
   if (plan.kind === "already_verified") {
     throw new ConvexError({
@@ -208,6 +218,8 @@ export async function openVerificationRequest(
       targetLoa: 3,
       entryLoa: profile.loa,
       method: "video_manual_review",
+      // Seulement quand il diffère : Niveau 2 attesté sans pièce examinée.
+      ...(proofLoa !== profile.loa ? { documentaryLoa: proofLoa } : {}),
     },
   });
   if (kycRequestId && plan.openDocumentTrack) {

@@ -60,6 +60,9 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   duplicate_flag_resolved: "Signalement de doublon traité",
   signup_blocked_duplicate: "Inscription bloquée (identité déjà vérifiée)",
   signup_abandoned: "Inscription abandonnée",
+  level_attested: "Niveau 2 accordé grâce à votre inscription consulaire",
+  level_attestation_withdrawn: "Confirmation de votre inscription consulaire retirée",
+  level_attestation_refused: "Confirmation de votre inscription consulaire non prise en compte",
 };
 
 const SHORT_MONTHS_FR = [
