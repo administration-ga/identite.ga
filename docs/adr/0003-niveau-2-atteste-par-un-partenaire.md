@@ -28,7 +28,10 @@
    partenaire détient déjà (`Authorization: Basic`). La capacité vit en base (table
    `partnerLevelGrant`), s'ouvre et se ferme par un geste d'opérateur tracé
    (`partnerLevel/attestations:grantCapability`, `revokeCapability`, audit `admin_action`). 401
-   avant 403 ; plafond de 120 appels par minute et par client.
+   avant 403 ; plafond de 120 appels par minute et par client. L'opérateur peut lever les
+   attestations actives d'un client, capacité ouverte ou fermée (`operatorWithdraw`, une page par
+   appel, même règle et mêmes écritures que le retrait du partenaire, opérateur inscrit au
+   journal).
 3. **Une table de trace, jamais de baisse à l'attestation, un retrait borné.** Table
    `levelAttestation` (une ligne par client, sujet et type de fait ; clé d'idempotence ; une
    nouvelle attestation après un retrait réactive la même ligne). Elle garde le niveau constaté
@@ -39,23 +42,39 @@
    charge de l'avoir monté). Journal : `level_attested`, `level_attestation_withdrawn`,
    `level_attestation_refused` (avec le motif, sans donnée civile). La personne est prévenue
    quand son niveau monte ou redescend.
-4. **Refus.** Consentement de la personne pour ce client exigé à l'attestation (`not_linked`).
-   Revue humaine si la dernière demande KYC a été refusée ou si un doublon est ouvert
-   (`review_required`). Non éligible : profil incomplet, compte autre que citoyen, suppression
-   demandée (`not_eligible`). Sujet inconnu ou anonymisé : `unknown_subject`.
+4. **Refus.** Consentement de la personne pour ce client exigé à l'attestation (`not_linked`), et
+   au retrait quand aucune attestation n'a jamais été enregistrée pour ce sujet (la route ne
+   renseigne pas sur le niveau d'un compte inconnu du partenaire). Revue humaine si la dernière
+   **décision** KYC est un refus — une demande refusée plus récente que la dernière approuvée ;
+   une demande rouverte ensuite ne l'efface pas — ou si un doublon est ouvert
+   (`review_required`). Non éligible : profil incomplet, compte autre que citoyen, nationalité
+   enregistrée autre que gabonaise pour une inscription consulaire, suppression demandée
+   (`not_eligible`). Sujet inconnu ou anonymisé : `unknown_subject`.
+
+   **Identité lue par le partenaire.** Le partenaire compare son dossier à une copie de l'état
+   civil IDN. L'attestation porte `identityReadAt` (moment de cette lecture, 0 si inconnu) ; IDN
+   date chaque changement réel du nom, des prénoms, de la date de naissance ou de la nationalité
+   (`userProfile.pivotUpdatedAt`, écrit par `onboarding.completeSignup`,
+   `onboarding.setIdentityPivot`, `profile.updatePivot`, `delegate/mutations.createDelegatedProfile`)
+   et refuse une identité modifiée après la lecture (`409 identity_stale`). Sans reprise de
+   l'existant : un champ absent vaut « inchangé depuis la mise en service ».
 5. **Un Niveau 2 attesté seulement n'est pas une preuve documentaire.** « Attesté seulement » :
    attestation active qui a monté le compte, et aucune demande KYC approuvée
    (`verification/documentProof.ts`, `documentaryLoa`). Pour ces comptes, et pour eux seuls : le
    Niveau 3 passe par la piste documentaire comme depuis le Niveau 1 (`verification/requestFlow.ts`,
    `verification.getMine`, `level3/scheduling.ts`), la décision de Niveau 3 exige des pièces
-   constatées (`level3/decision.ts`), et un homonyme qui s'inscrit est signalé, pas refusé
+   constatées (`level3/decision.ts`), le contrôleur ne peut pas planifier l'entretien avant les
+   pièces (`controller/agenda.ts`), `level3Verification.entryLoa` enregistre ce niveau de preuve
+   (la file partenaire et l'agenda n'escamotent donc pas l'étape des pièces ; le niveau détenu
+   reste au journal, `heldLoa`), et un homonyme qui s'inscrit est signalé, pas refusé
    (`lib/duplicateGuard.ts`) — sinon une attestation suffirait à verrouiller un nom contre son
    vrai porteur. Un compte dont les pièces ont été approuvées ferme toujours la porte.
 6. **État civil verrouillé pendant une attestation active.** Nom, prénoms, date de naissance,
    nationalité et NIP ne se modifient plus depuis l'espace de la personne (`profile.updatePivot`,
-   `profile.updateNip`, `onboarding.setIdentityPivot` ; code `IDENTITY_LOCKED`). Une saisie
-   identique passe ; genre et lieu de naissance restent modifiables ; ajouter un premier NIP reste
-   permis. Le verrou ne s'applique pas aux comptes vérifiés par KYC sans attestation.
+   `profile.updateNip`, `onboarding.setIdentityPivot` ; code `IDENTITY_LOCKED`), et le compte ne
+   quitte pas le type « citoyen » (`onboarding.selectProfile`). Une saisie identique passe ; genre
+   et lieu de naissance restent modifiables ; ajouter un premier NIP reste permis. Le verrou ne
+   s'applique pas aux comptes vérifiés par KYC sans attestation.
 
 ## Conséquences
 
@@ -68,7 +87,26 @@
   devront dire qu'un compte attesté doit fournir ses pièces. Hors de ce changement.
 - La purge RGPD (`privacy/deletion.ts`) efface les attestations du compte ; le journal reste.
 - Fermer la capacité d'un client ne retire pas ses attestations : l'opérateur les revoit avec
-  `listAttested`.
+  `listAttested` et les lève avec `operatorWithdraw`.
+
+## Limites connues
+
+Acceptées ou reportées après la revue de sécurité du 25/11/2026 :
+
+- **Un refus KYC postérieur à l'attestation ne la retire pas.** Le refus est vérifié au moment
+  d'attester ; ensuite, seul le partenaire (`withdraw`) ou l'opérateur (`operatorWithdraw`) lève
+  l'attestation.
+- **`grantCapability` ne refuse pas une application en bac à sable.** C'est un geste explicite
+  d'opérateur ; une application en bac à sable n'atteint de toute façon que ses propres
+  personnes d'essai, par leur consentement.
+- **Retirer son consentement ne lève pas le verrou d'état civil.** Le verrou suit l'attestation,
+  pas le consentement ; le partenaire ou l'opérateur la retire.
+- **La date de naissance n'est pas comparée par le partenaire aujourd'hui** : consulat.ga ne
+  demande pas le scope `idn:civil_status`, qui porte `birthdate`. Sa comparaison porte sur les
+  noms et prénoms ; IDN verrouille et date néanmoins la date de naissance.
+- **`identityReadAt` est déclaratif** : IDN croit le partenaire sur l'heure de sa lecture. La
+  règle protège un partenaire de bonne foi contre une copie périmée, pas contre un partenaire
+  qui mentirait.
 
 ## Alternatives écartées
 

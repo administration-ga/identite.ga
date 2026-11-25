@@ -13,6 +13,7 @@ import {
   assertCivilStatusEditable,
   assertNipReplaceable,
 } from "./partnerLevel/identityLock"
+import { changedCivilStatusFields } from "./partnerLevel/rules"
 import { internal } from "./_generated/api"
 
 /**
@@ -196,12 +197,17 @@ export const updatePivot = mutation({
     // Identité attestée par un partenaire (inscription consulaire) : nom,
     // prénoms, date de naissance et nationalité verrouillés tant que
     // l'attestation est active. Inerte sans attestation (ADR 0003).
-    await assertCivilStatusEditable(ctx, user.userId, profile.pivot, {
+    const nextCivilStatus = {
       firstName: args.firstName,
       lastName: args.lastName,
       dateOfBirth: args.dateOfBirth,
       nationality: args.nationality,
-    })
+    }
+    await assertCivilStatusEditable(ctx, user.userId, profile.pivot, nextCivilStatus)
+    // Changement RÉEL de l'état civil : daté pour l'attestation de niveau, qui
+    // refuse une identité modifiée après la lecture du partenaire.
+    const civilStatusChanged =
+      changedCivilStatusFields(profile.pivot, nextCivilStatus).length > 0
 
     // Préserve les champs non touchés par updatePivot (phone, nip).
     const existingPhone = profile.pivot?.phone
@@ -248,6 +254,7 @@ export const updatePivot = mutation({
       pivotKey,
       nipKey,
       phoneKey,
+      ...(civilStatusChanged ? { pivotUpdatedAt: Date.now() } : {}),
       updatedAt: Date.now(),
     })
 

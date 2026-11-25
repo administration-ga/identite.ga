@@ -1,7 +1,7 @@
 import { components } from "../_generated/api"
 import type { Doc } from "../_generated/dataModel"
 import type { QueryCtx } from "../_generated/server"
-import type { AttestationKind } from "./rules"
+import { lastTerminalKycDecision, type AttestationKind } from "./rules"
 
 /**
  * Lectures partagées de l'attestation de niveau (contrat
@@ -71,6 +71,33 @@ export async function hasApprovedKyc(ctx: Reader, userId: string): Promise<boole
     )
     .first()
   return approved !== null
+}
+
+/**
+ * Dernière DÉCISION KYC du compte (cf. `lastTerminalKycDecision`) : les
+ * demandes approuvées et refusées les plus récentes, lues par l'index
+ * `by_userId_status` (bornées), datées par leur décision (`reviewedAt`, à
+ * défaut `updatedAt`). Une demande en cours ouverte après un refus ne
+ * l'efface pas.
+ */
+export async function lastTerminalKycOf(
+  ctx: Reader,
+  userId: string,
+): Promise<"approved" | "rejected" | null> {
+  const rows: Array<{ status: string; decidedAt: number }> = []
+  for (const status of ["approved", "rejected"] as const) {
+    const decided = await ctx.db
+      .query("kycRequest")
+      .withIndex("by_userId_status", (q) =>
+        q.eq("userId", userId).eq("status", status),
+      )
+      .order("desc")
+      .take(20)
+    for (const row of decided) {
+      rows.push({ status, decidedAt: row.reviewedAt ?? row.updatedAt })
+    }
+  }
+  return lastTerminalKycDecision(rows)
 }
 
 /**

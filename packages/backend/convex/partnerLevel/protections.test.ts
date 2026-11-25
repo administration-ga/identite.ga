@@ -38,7 +38,8 @@ vi.mock("../lib/auth", async () => {
     }
     return {
       userId: identity.subject,
-      email: `${identity.subject}@example.ga`,
+      // Domaine IDN : `onboarding.completeSignup` exige handle@idn.ga.
+      email: `${identity.subject}@idn.ga`,
       emailVerified: true,
       roles: identity.subject.startsWith("controller_") ? ["identity_controller"] : [],
     }
@@ -490,6 +491,159 @@ describe("état civil verrouillé pendant une attestation active", () => {
       lastName: "MBINA NDONG",
     })
     expect((await profileOf(t, "citizen_retire"))?.pivot?.lastName).toBe("MBINA NDONG")
+  })
+})
+
+describe("niveau d'entrée et préparation de l'entretien (revue E)", () => {
+  test("la demande de Niveau 3 d'un compte attesté seulement enregistre le niveau de preuve", async () => {
+    const t = makeT()
+    await seedAttestedOnly(t, "citizen_att")
+    const { verificationId } = await t
+      .withIdentity({ subject: "citizen_att" })
+      .mutation(api.verification.request, { targetLoa: 3, documentType: "cni_gabon" })
+
+    const verification = await t.run(async (ctx) => ctx.db.get(verificationId!))
+    expect(verification?.entryLoa).toBe(1)
+    const audit = await t.run(async (ctx) =>
+      (await ctx.db.query("auditLog").collect()).find(
+        (row) => row.action === "level3_requested",
+      ),
+    )
+    expect(audit?.metadata).toMatchObject({ entryLoa: 1, heldLoa: 2 })
+  })
+
+  test("un Niveau 2 obtenu par KYC garde un niveau d'entrée 2 (inerte)", async () => {
+    const t = makeT()
+    await seedProfile(t, "citizen_kyc", 2)
+    await seedApprovedKyc(t, "citizen_kyc")
+    const { verificationId } = await t
+      .withIdentity({ subject: "citizen_kyc" })
+      .mutation(api.verification.request, { targetLoa: 3 })
+
+    const verification = await t.run(async (ctx) => ctx.db.get(verificationId!))
+    expect(verification?.entryLoa).toBe(2)
+    const audit = await t.run(async (ctx) =>
+      (await ctx.db.query("auditLog").collect()).find(
+        (row) => row.action === "level3_requested",
+      ),
+    )
+    expect(audit?.metadata).not.toHaveProperty("heldLoa")
+  })
+
+  test("le contrôleur ne peut pas planifier un compte attesté sans pièces soumises", async () => {
+    const t = makeT()
+    await seedAttestedOnly(t, "citizen_att")
+    await seedProfile(t, "controller_att", 2, { firstName: "Paul", lastName: "OBAME" })
+    const controller = t.withIdentity({ subject: "controller_att" })
+    const { verificationId } = await t
+      .withIdentity({ subject: "citizen_att" })
+      .mutation(api.verification.request, { targetLoa: 3, documentType: "cni_gabon" })
+    const startsAt = Date.now() + 48 * 60 * 60 * 1000
+    await controller.mutation(api.level3.scheduling.createAvailability, {
+      startsAt,
+      endsAt: startsAt + 60 * 60 * 1000,
+      durationMinutes: 30,
+    })
+    const slot = await t.run(async (ctx) => ctx.db.query("level3AppointmentSlot").first())
+
+    const planning = await controller.query(api.controller.agenda.planning, {
+      from: Date.now(),
+      to: startsAt + 2 * 60 * 60 * 1000,
+    })
+    expect(
+      planning.waiting.find((row) => row.verificationId === verificationId)?.documentsReady,
+    ).toBe(false)
+    expect(
+      await codeOf(
+        controller.mutation(api.controller.agenda.assignSlot, {
+          verificationId: verificationId!,
+          slotId: slot!._id,
+        }),
+      ),
+    ).toBe("DOCUMENTS_REQUIRED")
+  })
+})
+
+describe("type de compte sous attestation active (revue F)", () => {
+  test("quitter le type citoyen est refusé tant que l'attestation est active", async () => {
+    const t = makeT()
+    await seedAttestedOnly(t, "citizen_att")
+    const citizen = t.withIdentity({ subject: "citizen_att" })
+
+    expect(
+      await codeOf(citizen.mutation(api.onboarding.selectProfile, { profileType: "visitor" })),
+    ).toBe("IDENTITY_LOCKED")
+    expect((await profileOf(t, "citizen_att"))?.profileType).toBe("citizen")
+    // Reconfirmer le même type reste permis.
+    await citizen.mutation(api.onboarding.selectProfile, { profileType: "citizen" })
+  })
+
+  test("sans attestation active, le type se change comme avant", async () => {
+    const t = makeT()
+    await seedProfile(t, "citizen_libre", 2)
+    await seedAttestation(t, "citizen_libre", { status: "withdrawn" })
+    await t
+      .withIdentity({ subject: "citizen_libre" })
+      .mutation(api.onboarding.selectProfile, { profileType: "resident" })
+    expect((await profileOf(t, "citizen_libre"))?.profileType).toBe("resident")
+  })
+})
+
+describe("date du dernier changement d'état civil (revue C)", () => {
+  test("updatePivot la pose quand un champ verrouillable change, pas sinon", async () => {
+    const t = makeT()
+    await seedProfile(t, "citizen_c", 1)
+    await t.run(async (ctx) => {
+      const profile = await ctx.db
+        .query("userProfile")
+        .withIndex("by_userId", (q) => q.eq("userId", "citizen_c"))
+        .unique()
+      await ctx.db.patch(profile!._id, { pivotUpdatedAt: 123 })
+    })
+    const citizen = t.withIdentity({ subject: "citizen_c" })
+
+    // Mêmes valeurs (rognage et casse compris), et genre seul : inchangé.
+    await citizen.mutation(api.profile.updatePivot, { ...PIVOT, firstName: " Awa ", nationality: "ga" })
+    await citizen.mutation(api.profile.updatePivot, { ...PIVOT, gender: "O" })
+    expect((await profileOf(t, "citizen_c"))?.pivotUpdatedAt).toBe(123)
+
+    const before = Date.now()
+    await citizen.mutation(api.profile.updatePivot, { ...PIVOT, lastName: "MBINA NDONG" })
+    expect((await profileOf(t, "citizen_c"))?.pivotUpdatedAt).toBeGreaterThanOrEqual(before)
+  })
+
+  test("setIdentityPivot la pose quand l'état civil change", async () => {
+    const t = makeT()
+    await seedProfile(t, "citizen_c", 1)
+    const before = Date.now()
+    await t
+      .withIdentity({ subject: "citizen_c" })
+      .mutation(api.onboarding.setIdentityPivot, { ...PIVOT, dateOfBirth: "1995-03-13" })
+    expect((await profileOf(t, "citizen_c"))?.pivotUpdatedAt).toBeGreaterThanOrEqual(before)
+  })
+
+  test("l'inscription et la création déléguée la posent à la création du pivot", async () => {
+    const t = makeT()
+    const before = Date.now()
+    await t.withIdentity({ subject: "awa.mbina" }).mutation(api.onboarding.completeSignup, {
+      handle: "awa.mbina",
+      pin: "246813",
+      profileType: "citizen",
+      pivot: { ...PIVOT, firstName: "Ines" },
+    })
+    expect((await profileOf(t, "awa.mbina"))?.pivotUpdatedAt).toBeGreaterThanOrEqual(before)
+
+    await t.mutation(internal.delegate.mutations.createDelegatedProfile, {
+      userId: "delegue_1",
+      profileType: "citizen",
+      pivot: { ...PIVOT, firstName: "Jeanne", lastName: "NZE" },
+      assignedLoa: 1,
+      appClientId: "consulat-ga",
+      operatorUserId: "operateur_1",
+      claimCodeHash: "abc",
+      claimCodeExpiresAt: Date.now() + 60_000,
+    })
+    expect((await profileOf(t, "delegue_1"))?.pivotUpdatedAt).toBeGreaterThanOrEqual(before)
   })
 })
 

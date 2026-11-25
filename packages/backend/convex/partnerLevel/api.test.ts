@@ -135,7 +135,10 @@ function post(
   })
 }
 
-const BODY = { sub: "citizen_a", kind: "consular_registration" }
+/** Corps d'attestation : `identityReadAt` est obligatoire (0 si inconnu). */
+const BODY = { sub: "citizen_a", kind: "consular_registration", identityReadAt: 0 }
+/** Corps de retrait : `identityReadAt` y est un champ inconnu. */
+const WITHDRAW_BODY = { sub: "citizen_a", kind: "consular_registration" }
 
 describe("authentification et capacité", () => {
   test("sans en-tête Basic : 401 invalid_client", async () => {
@@ -330,7 +333,7 @@ describe("POST /partner-level/v1/attestations/withdraw", () => {
     await seedCitizen(t, "citizen_a")
     await post(t, ATTEST, BODY)
 
-    const res = await post(t, WITHDRAW, { ...BODY, dryRun: false })
+    const res = await post(t, WITHDRAW, { ...WITHDRAW_BODY, dryRun: false })
 
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
@@ -343,16 +346,90 @@ describe("POST /partner-level/v1/attestations/withdraw", () => {
     await seedClient(t)
     await enable(t)
     await seedCitizen(t, "citizen_a")
-    const res = await post(t, WITHDRAW, BODY)
+    const res = await post(t, WITHDRAW, WITHDRAW_BODY)
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ outcome: "not_attested", loa: 1 })
   })
 
-  test("mauvais secret : 401 ; champ en trop : 400", async () => {
+  test("sans attestation connue ni consentement : 409 not_linked", async () => {
     const t = makeT()
     await seedClient(t)
     await enable(t)
-    expect((await post(t, WITHDRAW, BODY, basic(CLIENT, "faux"))).status).toBe(401)
-    expect((await post(t, WITHDRAW, { ...BODY, reason: "x" })).status).toBe(400)
+    await seedCitizen(t, "citizen_a", { consent: false })
+    const res = await post(t, WITHDRAW, WITHDRAW_BODY)
+    expect(res.status).toBe(409)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body).toMatchObject({ error: "not_linked" })
+    expect(body).not.toHaveProperty("loa")
+  })
+
+  test("mauvais secret : 401 ; champ en trop, identityReadAt compris : 400", async () => {
+    const t = makeT()
+    await seedClient(t)
+    await enable(t)
+    expect((await post(t, WITHDRAW, WITHDRAW_BODY, basic(CLIENT, "faux"))).status).toBe(401)
+    expect((await post(t, WITHDRAW, { ...WITHDRAW_BODY, reason: "x" })).status).toBe(400)
+    expect((await post(t, WITHDRAW, BODY)).status).toBe(400)
+  })
+})
+
+describe("amendements du contrat (revue B et C)", () => {
+  test("identityReadAt absent, négatif ou non entier : 400 invalid_request", async () => {
+    const t = makeT()
+    await seedClient(t)
+    await enable(t)
+    await seedCitizen(t, "citizen_a")
+    for (const body of [
+      WITHDRAW_BODY,
+      { ...BODY, identityReadAt: -1 },
+      { ...BODY, identityReadAt: 12.5 },
+      { ...BODY, identityReadAt: "0" },
+    ]) {
+      const res = await post(t, ATTEST, body)
+      expect(res.status).toBe(400)
+      expect(await res.json()).toMatchObject({ error: "invalid_request" })
+    }
+  })
+
+  test("état civil modifié après la lecture du partenaire : 409 identity_stale", async () => {
+    const t = makeT()
+    await seedClient(t)
+    await enable(t)
+    await seedCitizen(t, "citizen_a")
+    const changedAt = Date.now() - 1_000
+    await t.run(async (ctx) => {
+      const profile = await ctx.db
+        .query("userProfile")
+        .withIndex("by_userId", (q) => q.eq("userId", "citizen_a"))
+        .unique()
+      await ctx.db.patch(profile!._id, { pivotUpdatedAt: changedAt })
+    })
+
+    const res = await post(t, ATTEST, { ...BODY, identityReadAt: changedAt - 1 })
+    expect(res.status).toBe(409)
+    expect(await res.json()).toMatchObject({ error: "identity_stale" })
+
+    const fresh = await post(t, ATTEST, { ...BODY, identityReadAt: changedAt })
+    expect(fresh.status).toBe(200)
+  })
+
+  test("nationalité autre que gabonaise : 422 not_eligible / nationality", async () => {
+    const t = makeT()
+    await seedClient(t)
+    await enable(t)
+    await seedCitizen(t, "citizen_a")
+    await t.run(async (ctx) => {
+      const profile = await ctx.db
+        .query("userProfile")
+        .withIndex("by_userId", (q) => q.eq("userId", "citizen_a"))
+        .unique()
+      await ctx.db.patch(profile!._id, {
+        pivot: { ...profile!.pivot!, nationality: "FRANCE" },
+      })
+    })
+
+    const res = await post(t, ATTEST, BODY)
+    expect(res.status).toBe(422)
+    expect(await res.json()).toMatchObject({ error: "not_eligible", reason: "nationality" })
   })
 })

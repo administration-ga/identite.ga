@@ -10,6 +10,10 @@ consulaire dans consulat.ga est par défaut au **Niveau 2** sur son compte IDN a
 
 Serveur à serveur. Pas de CORS.
 
+> Contrat amendé le 25/11/2026 avant toute publication, après une revue de sécurité :
+> `identityReadAt` obligatoire, refus `identity_stale`, motif `nationality`, règle KYC sur la
+> dernière décision, `not_linked` au retrait sans attestation connue, retrait par l'opérateur.
+
 ## Authentification
 
 ```
@@ -26,26 +30,37 @@ secret, aucune variable d'environnement. Le client doit :
 La capacité est **fermée par défaut**. Un secret faux donne `401` même pour un client sans
 capacité : un appelant anonyme n'apprend pas quels clients sont habilités.
 
-### Ouvrir ou fermer la capacité (geste d'opérateur)
+### Gestes d'opérateur
 
 Par la CLI Convex (fonctions internes, jamais exposées), sur le déploiement visé. En
 production, nommer explicitement le déploiement `flexible-panda-248` et ne jamais utiliser
 `--prod` (cf. `packages/backend/convex/AGENTS.md`) :
 
 ```sh
+# Ouvrir, fermer la capacité
 npx convex run --deployment flexible-panda-248 partnerLevel/attestations:grantCapability \
   '{"clientId":"<client_id>","kind":"consular_registration","grantedBy":"<nom de l opérateur>"}'
 
 npx convex run --deployment flexible-panda-248 partnerLevel/attestations:revokeCapability \
   '{"clientId":"<client_id>","kind":"consular_registration","revokedBy":"<nom de l opérateur>"}'
+
+# Retirer les attestations actives d'un client, une page par appel
+npx convex run --deployment flexible-panda-248 partnerLevel/attestations:operatorWithdraw \
+  '{"clientId":"<client_id>","kind":"consular_registration","operator":"<nom de l opérateur>","paginationOpts":{"numItems":50,"cursor":null}}'
 ```
 
 - `grantCapability` refuse un client absent, public ou désactivé, et rend le nom du client pour
   vérification. Il est idempotent et rouvre une capacité fermée.
-- Les deux gestes sont tracés au journal d'audit (`admin_action`, métadonnée `kind` :
+- Ouverture et fermeture sont tracées au journal d'audit (`admin_action`, métadonnée `kind` :
   `partner_level_capability_granted` ou `partner_level_capability_revoked`).
-- Fermer la capacité ne retire pas les attestations déjà enregistrées. Le client ne peut plus ni
-  attester ni retirer. Revue : `partnerLevel/attestations:listAttested`
+- Fermer la capacité **ne retire pas** les attestations déjà enregistrées : elles restent
+  actives, avec leur verrou d'état civil, et le client ne peut plus ni attester ni retirer.
+- `operatorWithdraw` lève ces attestations, que la capacité soit encore ouverte ou déjà fermée.
+  Il applique la même règle que le retrait du partenaire, avec les mêmes écritures, le même
+  journal (l'opérateur y est inscrit) et les mêmes notifications. Il traite une page par appel et
+  rend `{ withdrawn, kept, continueCursor, isDone }` : relancer avec `continueCursor` jusqu'à
+  `isDone`. Une seconde passe ne trouve plus rien.
+- Revue : `partnerLevel/attestations:listAttested`
   (`{"paginationOpts":{"numItems":50,"cursor":null}}`, une page par appel).
 
 ## Base
@@ -57,11 +72,15 @@ Préfixe des routes : `/partner-level/v1`.
 
 | Appel | Corps | Réponse `200` |
 |---|---|---|
-| `POST /partner-level/v1/attestations` | `{ sub, kind, dryRun? }` | `{ outcome, loa, acr, attestedAt, dryRun }` |
+| `POST /partner-level/v1/attestations` | `{ sub, kind, identityReadAt, dryRun? }` | `{ outcome, loa, acr, attestedAt, dryRun }` |
 | `POST /partner-level/v1/attestations/withdraw` | `{ sub, kind, dryRun? }` | `{ outcome, loa, acr, dryRun }` |
 
 - `sub` : identifiant OIDC de la personne (le `sub` du jeton d'identité), 128 caractères au plus.
 - `kind` : `consular_registration`, seule valeur admise aujourd'hui.
+- `identityReadAt` (attestation seulement, **obligatoire**) : entier positif ou nul, en
+  millisecondes depuis l'époque Unix. C'est le moment où le partenaire a lu pour la dernière fois
+  l'identité de ce sujet chez IDN (connexion par IDN, lecture de `userinfo`), celle qu'il a
+  comparée au dossier. `0` si le partenaire ne le sait pas. Champ inconnu au retrait (`400`).
 - `dryRun` : booléen facultatif, `false` par défaut. Voir plus bas.
 - Corps strict : tout autre champ est refusé (`400`).
 - `loa` : niveau du compte après l'appel (1, 2 ou 3) ; `acr` : `eidas1`, `eidas2` ou `eidas3`.
@@ -76,6 +95,17 @@ Préfixe des routes : `/partner-level/v1`.
 | `already_attested` | Une attestation active existe déjà pour ce client, ce sujet et ce type : rien n'est refait. |
 | `recorded` | Le compte était déjà au Niveau 2 ou 3 par une autre voie : simple trace, le niveau ne bouge pas. Une attestation ne fait **jamais** baisser un niveau. |
 
+### Identité lue par le partenaire (`identity_stale`)
+
+Le partenaire compare son dossier à une **copie** de l'état civil IDN, prise lors de sa dernière
+lecture. La personne peut modifier son état civil entre-temps : le verrou n'existe qu'après
+l'attestation. IDN date donc chaque changement réel du nom, des prénoms, de la date de naissance
+ou de la nationalité, et refuse l'attestation si ce changement est **postérieur** à
+`identityReadAt` (`409 identity_stale`). Le partenaire relit alors l'identité, la compare de
+nouveau à son dossier, puis atteste de nouveau avec le nouvel horodatage. Un état civil jamais modifié
+depuis la mise en service de cette règle passe, même avec `identityReadAt: 0`. Enregistrer les
+mêmes valeurs ne compte pas comme un changement.
+
 ### Résultat d'un retrait
 
 | `outcome` | Signification |
@@ -84,8 +114,13 @@ Préfixe des routes : `/partner-level/v1`.
 | `kept` | Attestation close, niveau inchangé : elle n'avait rien monté, ou des pièces ont été approuvées, ou le compte est au Niveau 3, ou une autre attestation active soutient le niveau. |
 | `not_attested` | Aucune attestation active pour ce client, ce sujet et ce type. |
 
-Le retrait n'exige pas de consentement en cours : un partenaire doit pouvoir lever son
-attestation même si la personne lui a retiré son consentement entre-temps.
+Consentement au retrait :
+- si une attestation a **déjà été enregistrée** pour ce client, ce sujet et ce type (active ou
+  retirée), aucun consentement en cours n'est exigé : un partenaire doit pouvoir lever son
+  attestation même si la personne lui a retiré son consentement entre-temps ;
+- si **aucune** attestation n'a jamais été enregistrée, le consentement de la personne pour ce
+  client est exigé, sinon `409 not_linked` : la route ne renseigne pas sur le niveau de comptes
+  que le partenaire ne connaît pas.
 
 ### Idempotence
 
@@ -96,9 +131,9 @@ Attester de nouveau après un retrait **réactive la même ligne**.
 
 Avec `"dryRun": true`, identite.ga évalue tout et **n'écrit rien** : aucune ligne
 d'attestation, aucun changement de niveau, aucune entrée au journal, aucune notification. La
-réponse montre l'effet qu'aurait l'appel (`outcome`, `loa` projeté). Un `dryRun` **consomme le
-plafond** du client, comme un appel réel : sans cela l'API deviendrait un oracle illimité sur les
-comptes.
+réponse montre l'effet qu'aurait l'appel (`outcome`, `loa` projeté) ; les refus sont les mêmes,
+`identity_stale` compris. Un `dryRun` **consomme le plafond** du client, comme un appel réel :
+sans cela l'API deviendrait un oracle illimité sur les comptes.
 
 ### Erreurs
 
@@ -106,26 +141,28 @@ Corps `{ error, message, reason? }`.
 
 | Statut | `error` | Cas |
 |---|---|---|
-| 400 | `invalid_request` | Corps JSON invalide, champ inconnu, `sub` absent, `kind` inconnu, `dryRun` non booléen |
+| 400 | `invalid_request` | Corps JSON invalide, champ inconnu, `sub` absent, `kind` inconnu, `dryRun` non booléen ; à l'attestation, `identityReadAt` absent, négatif ou non entier ; au retrait, `identityReadAt` présent |
 | 401 | `invalid_client` | Authentification absente ou incorrecte, y compris pour un client sans capacité |
 | 403 | `attestation_not_enabled` | Client authentifié sans capacité active |
 | 404 | `unknown_subject` | Sujet inconnu, compte sans profil, ou compte anonymisé |
-| 409 | `not_linked` | Attestation : aucun consentement enregistré de cette personne pour ce client |
-| 409 | `review_required` | `reason` : `kyc_rejected` (la dernière demande de vérification a été refusée), `duplicate_flag_open` (un signalement de doublon est ouvert sur le compte) |
-| 422 | `not_eligible` | `reason` : `profile_incomplete` (nom, prénom, date de naissance ou nationalité manquant), `profile_type` (compte autre que citoyen), `account_closing` (suppression du compte demandée) |
+| 409 | `not_linked` | Attestation : aucun consentement enregistré de cette personne pour ce client. Retrait : aucune attestation jamais enregistrée pour ce sujet, et aucun consentement |
+| 409 | `review_required` | `reason` : `kyc_rejected` (la dernière **décision** de vérification d'identité du compte est un refus : une demande refusée plus récente que la dernière demande approuvée ; une nouvelle demande encore en cours ne l'efface pas), `duplicate_flag_open` (un signalement de doublon est ouvert sur le compte) |
+| 409 | `identity_stale` | L'état civil a changé après `identityReadAt` |
+| 422 | `not_eligible` | `reason` : `profile_incomplete` (nom, prénom, date de naissance ou nationalité manquant), `profile_type` (compte autre que citoyen), `nationality` (nationalité enregistrée autre que gabonaise : admis `GA`, `GAB`, `GABON`, `GABONAIS`, `GABONAISE`, `GABONESE`, sans tenir compte de la casse, des espaces et des accents), `account_closing` (suppression du compte demandée) |
 | 429 | `rate_limited` | Plus de 120 appels par minute pour ce client (attestations et retraits confondus). En-tête `Retry-After` en secondes. |
 
-Ordre des contrôles : authentification, capacité, plafond, sujet, consentement (attestation
-seulement), attestation déjà active, éligibilité, revue humaine, niveau.
+Ordre des contrôles à l'attestation : authentification, capacité, plafond, sujet, consentement,
+attestation déjà active, éligibilité (type de compte, fermeture, profil complet, nationalité),
+revue humaine (KYC, doublon), fraîcheur de l'identité, niveau.
 
 ## Ce que l'attestation change pour la personne
 
 - **Notification** (catégorie vérification) : « Votre identité passe au Niveau 2 », ou au
   retrait « Votre identité revient au Niveau 1 ». Le texte nomme le partenaire.
 - **État civil verrouillé** tant qu'une attestation est active : nom, prénoms, date de naissance,
-  nationalité et NIP ne se modifient plus depuis l'espace de la personne (code
-  `IDENTITY_LOCKED`). Une correction passe par le consulat ou le support. Le genre et le lieu de
-  naissance restent modifiables.
+  nationalité et NIP ne se modifient plus depuis l'espace de la personne, et le compte reste un
+  compte de citoyen (code `IDENTITY_LOCKED`). Une correction passe par le consulat ou le support.
+  Le genre et le lieu de naissance restent modifiables.
 - **Niveau 3** : un Niveau 2 obtenu par la seule attestation n'est pas une preuve documentaire.
   Pour viser le Niveau 3, la personne fournit ses pièces comme depuis le Niveau 1.
 - **Doublons** : un homonyme qui s'inscrit face à un compte attesté seulement est signalé à un
@@ -143,6 +180,6 @@ exige des pièces examinées par IDN garde son propre contrôle. Voir `docs/veri
 curl -sS https://site.identite.ga/partner-level/v1/attestations \
   -u "$IDN_CLIENT_ID:$IDN_CLIENT_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"sub":"<sub OIDC>","kind":"consular_registration","dryRun":true}'
+  -d '{"sub":"<sub OIDC>","kind":"consular_registration","identityReadAt":1764070000000,"dryRun":true}'
 # → {"outcome":"applied","loa":2,"acr":"eidas2","attestedAt":1764072000000,"dryRun":true}
 ```

@@ -82,6 +82,8 @@ async function seedCitizen(
     loa?: 1 | 2 | 3
     profileType?: "citizen" | "resident" | "visitor" | "developer"
     withPivot?: boolean
+    nationality?: string
+    pivotUpdatedAt?: number
     closing?: boolean
     deleted?: boolean
   } = {},
@@ -101,9 +103,12 @@ async function seedCitizen(
               dateOfBirth: "1995-03-12",
               gender: "F" as const,
               birthPlace: "Port-Gentil",
-              nationality: "GA",
+              nationality: opts.nationality ?? "GA",
             },
           }),
+      ...(opts.pivotUpdatedAt !== undefined
+        ? { pivotUpdatedAt: opts.pivotUpdatedAt }
+        : {}),
       ...(opts.closing
         ? { deletionRequestedAt: now, deletionScheduledAt: now + 1000 }
         : {}),
@@ -148,7 +153,7 @@ async function seedConsent(
 function attest(
   t: T,
   sub: string,
-  opts: { clientId?: string; dryRun?: boolean } = {},
+  opts: { clientId?: string; dryRun?: boolean; identityReadAt?: number } = {},
 ) {
   return t.mutation(internal.partnerLevel.attestations.attest, {
     clientId: opts.clientId ?? CLIENT,
@@ -156,6 +161,37 @@ function attest(
     sub,
     kind: KIND,
     dryRun: opts.dryRun ?? false,
+    identityReadAt: opts.identityReadAt ?? Date.now(),
+  })
+}
+
+async function revokeConsent(t: T, userId: string) {
+  await t.run(async (ctx) => {
+    await ctx.runMutation(components.betterAuth.adapter.deleteOne, {
+      input: {
+        model: "oauthConsent",
+        where: [{ field: "userId", value: userId, operator: "eq" }],
+      },
+    })
+  })
+}
+
+async function seedKyc(
+  t: T,
+  userId: string,
+  status: "pending" | "approved" | "rejected",
+  decidedAt: number,
+) {
+  await t.run(async (ctx) => {
+    await ctx.db.insert("kycRequest", {
+      userId,
+      documentType: "passport",
+      documentImages: {},
+      status,
+      ...(status === "pending" ? {} : { reviewedAt: decidedAt }),
+      createdAt: decidedAt,
+      updatedAt: decidedAt,
+    })
   })
 }
 
@@ -657,5 +693,247 @@ describe("lecture de contrôle", () => {
     expect(page.page).toMatchObject([
       { userId: "citizen_a", clientId: CLIENT, kind: KIND, raised: true },
     ])
+  })
+})
+
+describe("refus KYC : la dernière décision, pas la dernière demande (revue A)", () => {
+  test("un refus suivi d'une nouvelle demande en attente refuse toujours", async () => {
+    // Sans cela, rouvrir une demande vide suffisait à effacer le refus d'un
+    // contrôleur aux yeux de l'attestation.
+    const t = makeT()
+    await readyCitizen(t)
+    const now = Date.now()
+    await seedKyc(t, "citizen_a", "rejected", now - 10_000)
+    await seedKyc(t, "citizen_a", "pending", now - 5_000)
+
+    expect(await attest(t, "citizen_a")).toEqual({
+      ok: false,
+      error: "review_required",
+      reason: "kyc_rejected",
+    })
+    expect((await profileOf(t, "citizen_a"))?.loa).toBe(1)
+  })
+
+  test("un refus suivi d'une approbation plus récente ne refuse pas", async () => {
+    const t = makeT()
+    await readyCitizen(t)
+    const now = Date.now()
+    await seedKyc(t, "citizen_a", "rejected", now - 10_000)
+    await seedKyc(t, "citizen_a", "approved", now - 5_000)
+
+    expect(await attest(t, "citizen_a")).toMatchObject({ ok: true, outcome: "applied" })
+  })
+
+  test("une approbation suivie d'un refus plus récent refuse", async () => {
+    const t = makeT()
+    await readyCitizen(t)
+    const now = Date.now()
+    await seedKyc(t, "citizen_a", "approved", now - 10_000)
+    await seedKyc(t, "citizen_a", "rejected", now - 5_000)
+
+    expect(await attest(t, "citizen_a")).toMatchObject({
+      ok: false,
+      error: "review_required",
+      reason: "kyc_rejected",
+    })
+  })
+
+  test("sans aucune demande KYC, rien n'est opposé", async () => {
+    const t = makeT()
+    await readyCitizen(t)
+    expect(await attest(t, "citizen_a")).toMatchObject({ ok: true, outcome: "applied" })
+  })
+})
+
+describe("nationalité de l'inscription consulaire (revue B)", () => {
+  test("une graphie admise passe, une autre nationalité est refusée", async () => {
+    const t = makeT()
+    await enable(t)
+    await seedCitizen(t, "gabonaise", { nationality: "GABONAISE" })
+    await seedCitizen(t, "camerounaise", { nationality: "CM" })
+    await seedConsent(t, "gabonaise")
+    await seedConsent(t, "camerounaise")
+
+    expect(await attest(t, "gabonaise")).toMatchObject({ ok: true, outcome: "applied" })
+    expect(await attest(t, "camerounaise")).toEqual({
+      ok: false,
+      error: "not_eligible",
+      reason: "nationality",
+    })
+    expect((await profileOf(t, "camerounaise"))?.loa).toBe(1)
+  })
+})
+
+describe("identité lue par le partenaire (revue C)", () => {
+  test("un état civil modifié après la lecture du partenaire : identity_stale, rien d'écrit", async () => {
+    const t = makeT()
+    const changedAt = Date.now() - 1_000
+    await enable(t)
+    await seedCitizen(t, "citizen_a", { pivotUpdatedAt: changedAt })
+    await seedConsent(t, "citizen_a")
+
+    expect(await attest(t, "citizen_a", { identityReadAt: changedAt - 1 })).toEqual({
+      ok: false,
+      error: "identity_stale",
+    })
+    expect((await profileOf(t, "citizen_a"))?.loa).toBe(1)
+    expect(await attestationsOf(t, "citizen_a")).toHaveLength(0)
+    expect(await notificationsOf(t, "citizen_a")).toHaveLength(0)
+    const refusals = await auditsOf(t, "level_attestation_refused")
+    expect(refusals).toHaveLength(1)
+    expect(refusals[0]!.metadata).toMatchObject({ error: "identity_stale" })
+  })
+
+  test("le même refus en dryRun n'écrit aucune trace", async () => {
+    const t = makeT()
+    const changedAt = Date.now() - 1_000
+    await enable(t)
+    await seedCitizen(t, "citizen_a", { pivotUpdatedAt: changedAt })
+    await seedConsent(t, "citizen_a")
+
+    expect(
+      await attest(t, "citizen_a", { identityReadAt: 0, dryRun: true }),
+    ).toEqual({ ok: false, error: "identity_stale" })
+    expect(await auditsOf(t, "level_attestation_refused")).toHaveLength(0)
+  })
+
+  test("un état civil jamais modifié depuis la mise en service passe avec identityReadAt 0", async () => {
+    const t = makeT()
+    await readyCitizen(t)
+    expect(await attest(t, "citizen_a", { identityReadAt: 0 })).toMatchObject({
+      ok: true,
+      outcome: "applied",
+    })
+  })
+
+  test("une lecture postérieure à la modification passe", async () => {
+    const t = makeT()
+    const changedAt = Date.now() - 1_000
+    await enable(t)
+    await seedCitizen(t, "citizen_a", { pivotUpdatedAt: changedAt })
+    await seedConsent(t, "citizen_a")
+    expect(await attest(t, "citizen_a", { identityReadAt: changedAt + 1 })).toMatchObject({
+      ok: true,
+      outcome: "applied",
+    })
+  })
+})
+
+describe("retrait sans attestation connue (revue D)", () => {
+  test("aucune ligne et aucun consentement : not_linked, refus tracé", async () => {
+    // Sinon n'importe quel client habilité lisait le niveau de tout sujet.
+    const t = makeT()
+    await enable(t)
+    await seedCitizen(t, "citizen_a")
+
+    expect(await withdraw(t, "citizen_a")).toEqual({ ok: false, error: "not_linked" })
+    const refusals = await auditsOf(t, "level_attestation_refused")
+    expect(refusals).toHaveLength(1)
+    expect(refusals[0]!.metadata).toMatchObject({
+      error: "not_linked",
+      operation: "withdraw",
+    })
+  })
+
+  test("une attestation retirée puis un consentement retiré : not_attested, sans consentement", async () => {
+    const t = makeT()
+    await readyCitizen(t)
+    await attest(t, "citizen_a")
+    await withdraw(t, "citizen_a")
+    await revokeConsent(t, "citizen_a")
+
+    expect(await withdraw(t, "citizen_a")).toMatchObject({
+      ok: true,
+      outcome: "not_attested",
+    })
+  })
+
+  test("un consentement retiré ne fige pas une attestation active", async () => {
+    const t = makeT()
+    await readyCitizen(t)
+    await attest(t, "citizen_a")
+    await revokeConsent(t, "citizen_a")
+
+    expect(await withdraw(t, "citizen_a")).toMatchObject({
+      ok: true,
+      outcome: "withdrawn",
+      loa: 1,
+    })
+  })
+})
+
+describe("retrait par l'opérateur (revue G)", () => {
+  /** Trois comptes attestés par le consulat : relevé, KYC approuvé, Niveau 3. */
+  async function threeAttested(t: T) {
+    await enable(t)
+    for (const [userId, loa] of [
+      ["releve", 1],
+      ["kyc_approuve", 1],
+      ["niveau_trois", 3],
+    ] as const) {
+      await seedCitizen(t, userId, { loa })
+      await seedConsent(t, userId)
+      await attest(t, userId)
+    }
+    await seedKyc(t, "kyc_approuve", "approved", Date.now())
+  }
+
+  test("ferme les attestations, ne redescend que ce qu'elles avaient monté, capacité fermée", async () => {
+    const t = makeT()
+    await threeAttested(t)
+    await t.mutation(internal.partnerLevel.attestations.revokeCapability, {
+      clientId: CLIENT,
+      kind: KIND,
+      revokedBy: "opérateur",
+    })
+
+    const result = await t.mutation(internal.partnerLevel.attestations.operatorWithdraw, {
+      clientId: CLIENT,
+      kind: KIND,
+      operator: "opératrice de garde",
+      paginationOpts: { numItems: 10, cursor: null },
+    })
+
+    expect(result).toMatchObject({ withdrawn: 1, kept: 2, isDone: true })
+    expect((await profileOf(t, "releve"))?.loa).toBe(1)
+    expect((await profileOf(t, "kyc_approuve"))?.loa).toBe(2)
+    expect((await profileOf(t, "niveau_trois"))?.loa).toBe(3)
+    for (const userId of ["releve", "kyc_approuve", "niveau_trois"]) {
+      expect(await attestationsOf(t, userId)).toMatchObject([{ status: "withdrawn" }])
+    }
+    const audits = await auditsOf(t, "level_attestation_withdrawn")
+    expect(audits).toHaveLength(3)
+    for (const audit of audits) {
+      expect(audit.metadata).toMatchObject({
+        clientId: CLIENT,
+        operator: "opératrice de garde",
+      })
+    }
+    // Seul le compte redescendu est prévenu une seconde fois.
+    expect(await notificationsOf(t, "releve")).toHaveLength(2)
+    expect(await notificationsOf(t, "kyc_approuve")).toHaveLength(1)
+  })
+
+  test("avance page par page, et une seconde passe ne fait plus rien", async () => {
+    const t = makeT()
+    await threeAttested(t)
+    const run = (cursor: string | null) =>
+      t.mutation(internal.partnerLevel.attestations.operatorWithdraw, {
+        clientId: CLIENT,
+        kind: KIND,
+        operator: "opérateur",
+        paginationOpts: { numItems: 2, cursor },
+      })
+
+    const first = await run(null)
+    expect(first.withdrawn + first.kept).toBe(2)
+    expect(first.isDone).toBe(false)
+    const second = await run(first.continueCursor)
+    expect(second.withdrawn + second.kept).toBe(1)
+    expect(second.isDone).toBe(true)
+
+    const again = await run(null)
+    expect(again).toMatchObject({ withdrawn: 0, kept: 0, isDone: true })
+    expect(await auditsOf(t, "level_attestation_withdrawn")).toHaveLength(3)
   })
 })

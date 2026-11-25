@@ -13,6 +13,7 @@ import {
   LEVEL3_MAX_BOOKING_HORIZON_MS,
   LEVEL3_REMINDER_LEAD_MS,
 } from "../level3/schedulingPolicy"
+import { documentaryLoa } from "../verification/documentProof"
 import { latestKycRow } from "../verification/requestFlow"
 import {
   type DocumentTrackStatus,
@@ -58,10 +59,14 @@ function citizenOf(profile: Doc<"userProfile"> | null) {
   }
 }
 
-/** Même critère que la réservation citoyen (`level3/scheduling.book`). */
+/**
+ * Même critère que la réservation citoyen (`level3/scheduling.book`), niveau
+ * de PREUVE compris : un Niveau 2 attesté seulement doit avoir soumis ses
+ * pièces (`verification/documentProof.ts`, ADR 0003).
+ */
 async function documentTrack(ctx: Pick<QueryCtx, "db">, verification: Doc<"level3Verification">) {
   const profile = await profileOf(ctx, verification.userId)
-  const loa = profile?.loa ?? 1
+  const loa = await documentaryLoa(ctx, verification.userId, profile?.loa ?? 1)
   const kyc = verification.kycRequestId
     ? await ctx.db.get(verification.kycRequestId)
     : await latestKycRow(ctx, verification.userId)

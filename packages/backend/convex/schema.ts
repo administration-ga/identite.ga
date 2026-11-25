@@ -367,6 +367,20 @@ export default defineSchema({
     pivotKey: v.optional(v.string()),
 
     /**
+     * Dernier changement RÉEL de l'état civil : création du pivot, ou
+     * modification du nom, des prénoms, de la date de naissance ou de la
+     * nationalité (`onboarding.completeSignup`, `onboarding.setIdentityPivot`,
+     * `profile.updatePivot`, `delegate/mutations.createDelegatedProfile`).
+     * Pas écrit quand les valeurs sont inchangées.
+     *
+     * Sert l'attestation de niveau (ADR 0003) : un partenaire qui a lu
+     * l'identité AVANT ce moment a comparé son dossier à une copie périmée
+     * (`identity_stale`). Pas de reprise de l'existant : absent veut dire
+     * « inchangé depuis la mise en service de ce champ ».
+     */
+    pivotUpdatedAt: v.optional(v.number()),
+
+    /**
      * NIP normalisé (majuscules, sans espaces) — cf. `normalizeNipKey`.
      * L'index `by_nip` porte sur `pivot.nip` **brut** et sert la résolution
      * annuaire partenaire, où le NIP est fourni tel qu'imprimé. Il ne peut pas
@@ -1813,5 +1827,7 @@ export default defineSchema({
   })
     .index("by_userId", ["userId"])
     .index("by_clientId_and_kind_and_userId", ["clientId", "kind", "userId"])
+    // Retrait par l'opérateur : parcourir les attestations ACTIVES d'un client.
+    .index("by_clientId_and_kind_and_status", ["clientId", "kind", "status"])
     .index("by_status_and_attestedAt", ["status", "attestedAt"]),
 })

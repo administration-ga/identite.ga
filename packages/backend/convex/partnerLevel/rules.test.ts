@@ -5,7 +5,9 @@ import {
   changedCivilStatusFields,
   decideAttestation,
   decideWithdrawal,
+  isGaboneseNationality,
   isPivotComplete,
+  lastTerminalKycDecision,
   parseAttestBody,
   parseWithdrawBody,
   type AttestationFacts,
@@ -23,57 +25,79 @@ import {
  */
 
 const ELIGIBLE: AttestationFacts = {
+  kind: "consular_registration",
   loa: 1,
   profileType: "citizen",
   pivotComplete: true,
+  nationality: "GA",
   closing: false,
-  latestKycStatus: null,
+  lastTerminalKyc: null,
   openDuplicateFlag: false,
+  pivotUpdatedAt: null,
+  identityReadAt: 1_000,
   activeAttestation: null,
   maxLoa: 2,
 }
 
+const BODY = { sub: "user_1", kind: "consular_registration", identityReadAt: 0 }
+
 describe("lecture stricte des corps HTTP", () => {
   test("un corps complet est accepté, dryRun vaut faux par défaut", () => {
     expect(
-      parseAttestBody({ sub: " user_1 ", kind: "consular_registration" }),
+      parseAttestBody({
+        sub: " user_1 ",
+        kind: "consular_registration",
+        identityReadAt: 1_764_072_000_000,
+      }),
     ).toEqual({
       ok: true,
-      value: { sub: "user_1", kind: "consular_registration", dryRun: false },
+      value: {
+        sub: "user_1",
+        kind: "consular_registration",
+        dryRun: false,
+        identityReadAt: 1_764_072_000_000,
+      },
     })
-    expect(
-      parseAttestBody({ sub: "user_1", kind: "consular_registration", dryRun: true }),
-    ).toEqual({
+    expect(parseAttestBody({ ...BODY, dryRun: true })).toEqual({
       ok: true,
-      value: { sub: "user_1", kind: "consular_registration", dryRun: true },
+      value: {
+        sub: "user_1",
+        kind: "consular_registration",
+        dryRun: true,
+        identityReadAt: 0,
+      },
     })
   })
 
   test("un champ en trop est refusé (une faute de frappe ne doit pas passer)", () => {
-    const parsed = parseAttestBody({
-      sub: "user_1",
-      kind: "consular_registration",
-      loa: 2,
-    })
+    const parsed = parseAttestBody({ ...BODY, loa: 2 })
     expect(parsed.ok).toBe(false)
     if (!parsed.ok) expect(parsed.message).toContain("loa")
   })
 
   test("un type de fait inconnu, un sub vide ou un dryRun non booléen sont refusés", () => {
-    expect(parseAttestBody({ sub: "user_1", kind: "passport" }).ok).toBe(false)
-    expect(parseAttestBody({ sub: "  ", kind: "consular_registration" }).ok).toBe(false)
-    expect(parseAttestBody({ kind: "consular_registration" }).ok).toBe(false)
-    expect(
-      parseAttestBody({ sub: "u", kind: "consular_registration", dryRun: "oui" }).ok,
-    ).toBe(false)
-    expect(
-      parseAttestBody({ sub: "u".repeat(129), kind: "consular_registration" }).ok,
-    ).toBe(false)
+    expect(parseAttestBody({ ...BODY, kind: "passport" }).ok).toBe(false)
+    expect(parseAttestBody({ ...BODY, sub: "  " }).ok).toBe(false)
+    expect(parseAttestBody({ kind: "consular_registration", identityReadAt: 0 }).ok).toBe(
+      false,
+    )
+    expect(parseAttestBody({ ...BODY, dryRun: "oui" }).ok).toBe(false)
+    expect(parseAttestBody({ ...BODY, sub: "u".repeat(129) }).ok).toBe(false)
     expect(parseAttestBody(null).ok).toBe(false)
     expect(parseAttestBody(["user_1"]).ok).toBe(false)
   })
 
-  test("le retrait suit la même lecture stricte", () => {
+  test("identityReadAt est obligatoire : entier positif ou nul, en millisecondes", () => {
+    expect(parseAttestBody({ sub: "user_1", kind: "consular_registration" }).ok).toBe(false)
+    expect(parseAttestBody({ ...BODY, identityReadAt: -1 }).ok).toBe(false)
+    expect(parseAttestBody({ ...BODY, identityReadAt: 1.5 }).ok).toBe(false)
+    expect(parseAttestBody({ ...BODY, identityReadAt: "1764072000000" }).ok).toBe(false)
+    expect(parseAttestBody({ ...BODY, identityReadAt: null }).ok).toBe(false)
+    expect(parseAttestBody({ ...BODY, identityReadAt: Number.MAX_VALUE }).ok).toBe(false)
+    expect(parseAttestBody({ ...BODY, identityReadAt: 0 }).ok).toBe(true)
+  })
+
+  test("le retrait suit la même lecture stricte, sans identityReadAt", () => {
     expect(
       parseWithdrawBody({ sub: "user_1", kind: "consular_registration", dryRun: false }),
     ).toEqual({
@@ -83,6 +107,9 @@ describe("lecture stricte des corps HTTP", () => {
     expect(
       parseWithdrawBody({ sub: "user_1", kind: "consular_registration", reason: "x" }).ok,
     ).toBe(false)
+    const withReadAt = parseWithdrawBody(BODY)
+    expect(withReadAt.ok).toBe(false)
+    if (!withReadAt.ok) expect(withReadAt.message).toContain("identityReadAt")
   })
 })
 
@@ -122,14 +149,13 @@ describe("décision d'attestation", () => {
     ).toEqual({ ok: true, outcome: "already_attested", loa: 2, attestedAt: 42 })
   })
 
-  test("la dernière demande KYC refusée renvoie vers une revue humaine", () => {
-    expect(decideAttestation({ ...ELIGIBLE, latestKycStatus: "rejected" })).toEqual({
+  test("la dernière décision KYC est un refus : revue humaine", () => {
+    expect(decideAttestation({ ...ELIGIBLE, lastTerminalKyc: "rejected" })).toEqual({
       ok: false,
       error: "review_required",
       reason: "kyc_rejected",
     })
-    // Une demande refusée suivie d'une nouvelle demande n'est plus « la dernière ».
-    expect(decideAttestation({ ...ELIGIBLE, latestKycStatus: "submitted" })).toMatchObject({
+    expect(decideAttestation({ ...ELIGIBLE, lastTerminalKyc: "approved" })).toMatchObject({
       ok: true,
       outcome: "applied",
     })
@@ -164,6 +190,109 @@ describe("décision d'attestation", () => {
       error: "not_eligible",
       reason: "account_closing",
     })
+  })
+
+  test("une inscription consulaire exige une nationalité gabonaise", () => {
+    for (const nationality of ["CM", "FRANCE", "GABONAIS DE COEUR"]) {
+      expect(decideAttestation({ ...ELIGIBLE, nationality })).toEqual({
+        ok: false,
+        error: "not_eligible",
+        reason: "nationality",
+      })
+    }
+  })
+
+  test("une identité modifiée après la lecture du partenaire est périmée", () => {
+    expect(
+      decideAttestation({ ...ELIGIBLE, pivotUpdatedAt: 2_000, identityReadAt: 1_999 }),
+    ).toEqual({ ok: false, error: "identity_stale" })
+    // Lue après la modification, ou jamais modifiée depuis la mise en service.
+    expect(
+      decideAttestation({ ...ELIGIBLE, pivotUpdatedAt: 2_000, identityReadAt: 2_000 }),
+    ).toMatchObject({ ok: true, outcome: "applied" })
+    expect(
+      decideAttestation({ ...ELIGIBLE, pivotUpdatedAt: null, identityReadAt: 0 }),
+    ).toMatchObject({ ok: true, outcome: "applied" })
+  })
+
+  test("ordre : idempotence d'abord, puis éligibilité et revue, puis fraîcheur", () => {
+    const stale = { pivotUpdatedAt: 2_000, identityReadAt: 0 }
+    expect(
+      decideAttestation({ ...ELIGIBLE, ...stale, activeAttestation: { attestedAt: 7 } }),
+    ).toMatchObject({ ok: true, outcome: "already_attested" })
+    expect(
+      decideAttestation({ ...ELIGIBLE, ...stale, lastTerminalKyc: "rejected" }),
+    ).toMatchObject({ ok: false, reason: "kyc_rejected" })
+    expect(
+      decideAttestation({ ...ELIGIBLE, ...stale, nationality: "CM" }),
+    ).toMatchObject({ ok: false, reason: "nationality" })
+    // Le compte déjà au Niveau 3 est lui aussi soumis à la fraîcheur.
+    expect(decideAttestation({ ...ELIGIBLE, ...stale, loa: 3 })).toEqual({
+      ok: false,
+      error: "identity_stale",
+    })
+  })
+})
+
+describe("dernière décision KYC", () => {
+  test("refus puis nouvelle demande en attente : le refus compte toujours", () => {
+    expect(
+      lastTerminalKycDecision([
+        { status: "rejected", decidedAt: 100 },
+        { status: "pending", decidedAt: 200 },
+      ]),
+    ).toBe("rejected")
+  })
+
+  test("refus puis approbation plus récente : approuvé", () => {
+    expect(
+      lastTerminalKycDecision([
+        { status: "rejected", decidedAt: 100 },
+        { status: "approved", decidedAt: 200 },
+      ]),
+    ).toBe("approved")
+  })
+
+  test("approbation puis refus plus récent : refusé", () => {
+    expect(
+      lastTerminalKycDecision([
+        { status: "approved", decidedAt: 100 },
+        { status: "rejected", decidedAt: 200 },
+      ]),
+    ).toBe("rejected")
+  })
+
+  test("aucune décision : rien à opposer", () => {
+    expect(lastTerminalKycDecision([])).toBeNull()
+    expect(
+      lastTerminalKycDecision([
+        { status: "submitted", decidedAt: 1 },
+        { status: "under_review", decidedAt: 2 },
+        { status: "expired", decidedAt: 3 },
+      ]),
+    ).toBeNull()
+  })
+})
+
+describe("nationalité gabonaise", () => {
+  test("les graphies admises, après rognage, majuscules et accents retirés", () => {
+    for (const value of [
+      "GA",
+      "gab",
+      " Gabon ",
+      "GABONAIS",
+      "gabonaise",
+      "Gabonese",
+      "GABONÈSE",
+    ]) {
+      expect(isGaboneseNationality(value)).toBe(true)
+    }
+  })
+
+  test("toute autre valeur est refusée", () => {
+    for (const value of ["CM", "FRANCE", "FR", "", "  ", "GABONAIS(E)", "G A"]) {
+      expect(isGaboneseNationality(value)).toBe(false)
+    }
   })
 })
 

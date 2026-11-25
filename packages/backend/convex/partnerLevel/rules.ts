@@ -28,6 +28,14 @@ export type LevelRequestInput = {
   dryRun: boolean
 }
 
+/**
+ * Corps d'attestation. `identityReadAt` (ms) : quand le partenaire a lu pour
+ * la dernière fois l'identité de ce sujet chez IDN, 0 s'il l'ignore. IDN refuse
+ * l'attestation si l'état civil a changé depuis (`identity_stale`) : le
+ * partenaire aurait comparé son dossier à une copie périmée.
+ */
+export type AttestRequestInput = LevelRequestInput & { identityReadAt: number }
+
 function plainObject(body: unknown): Record<string, unknown> | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return null
@@ -44,11 +52,15 @@ function unknownKeyMessage(
   return unknown ? `Champ inconnu « ${unknown} ».` : null
 }
 
-/** Même forme pour l'attestation et pour le retrait : `{ sub, kind, dryRun? }`. */
-function parseLevelBody(body: unknown): Parsed<LevelRequestInput> {
-  const object = plainObject(body)
-  if (!object) return { ok: false, message: "Corps JSON attendu." }
-  const unknown = unknownKeyMessage(object, ["sub", "kind", "dryRun"])
+/**
+ * Champs communs à l'attestation et au retrait : `{ sub, kind, dryRun? }`.
+ * `extraKeys` : champs admis en plus (l'attestation seule a `identityReadAt`).
+ */
+function parseLevelBody(
+  object: Record<string, unknown>,
+  extraKeys: readonly string[],
+): Parsed<LevelRequestInput> {
+  const unknown = unknownKeyMessage(object, ["sub", "kind", "dryRun", ...extraKeys])
   if (unknown) return { ok: false, message: unknown }
 
   const sub = typeof object.sub === "string" ? object.sub.trim() : ""
@@ -71,12 +83,31 @@ function parseLevelBody(body: unknown): Parsed<LevelRequestInput> {
   }
 }
 
-export function parseAttestBody(body: unknown): Parsed<LevelRequestInput> {
-  return parseLevelBody(body)
+export function parseAttestBody(body: unknown): Parsed<AttestRequestInput> {
+  const object = plainObject(body)
+  if (!object) return { ok: false, message: "Corps JSON attendu." }
+  const base = parseLevelBody(object, ["identityReadAt"])
+  if (!base.ok) return base
+  const identityReadAt = object.identityReadAt
+  if (
+    typeof identityReadAt !== "number" ||
+    !Number.isSafeInteger(identityReadAt) ||
+    identityReadAt < 0
+  ) {
+    return {
+      ok: false,
+      message:
+        "« identityReadAt » est requis : entier positif ou nul, en millisecondes (0 si inconnu).",
+    }
+  }
+  return { ok: true, value: { ...base.value, identityReadAt } }
 }
 
+/** Le retrait n'a pas `identityReadAt` : il y est refusé comme champ inconnu. */
 export function parseWithdrawBody(body: unknown): Parsed<LevelRequestInput> {
-  return parseLevelBody(body)
+  const object = plainObject(body)
+  if (!object) return { ok: false, message: "Corps JSON attendu." }
+  return parseLevelBody(object, [])
 }
 
 /** Même correspondance que `loaToAcr` (http.ts) et `userinfoClaims.ts`. */
@@ -109,6 +140,54 @@ export function isPivotComplete(
     typeof pivot.dateOfBirth === "string" &&
     /^\d{4}-\d{2}-\d{2}$/.test(pivot.dateOfBirth.trim())
   )
+}
+
+/**
+ * Graphies admises pour la nationalité gabonaise. `pivot.nationality` est un
+ * texte libre (mis en majuscules à l'écriture, deux caractères au moins) : on
+ * compare après rognage, majuscules et retrait des accents.
+ */
+const GABONESE_NATIONALITY = new Set([
+  "GA",
+  "GAB",
+  "GABON",
+  "GABONAIS",
+  "GABONAISE",
+  "GABONESE",
+])
+
+export function isGaboneseNationality(value: string | null | undefined): boolean {
+  if (typeof value !== "string") return false
+  const normalized = value
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .trim()
+    .toUpperCase()
+  return GABONESE_NATIONALITY.has(normalized)
+}
+
+/**
+ * Dernière DÉCISION KYC du compte : la plus récente entre la dernière demande
+ * approuvée et la dernière refusée, datées par leur décision. Les demandes en
+ * cours (`pending`, `submitted`, `under_review`, `complement_required`) et
+ * expirées ne comptent pas : rouvrir une demande vide ne doit pas effacer le
+ * refus d'un contrôleur. À égalité de date, le refus l'emporte.
+ */
+export function lastTerminalKycDecision(
+  rows: ReadonlyArray<{ status: string; decidedAt: number }>,
+): "approved" | "rejected" | null {
+  let latest: { status: "approved" | "rejected"; decidedAt: number } | null = null
+  for (const row of rows) {
+    if (row.status !== "approved" && row.status !== "rejected") continue
+    if (
+      !latest ||
+      row.decidedAt > latest.decidedAt ||
+      (row.decidedAt === latest.decidedAt && row.status === "rejected")
+    ) {
+      latest = { status: row.status, decidedAt: row.decidedAt }
+    }
+  }
+  return latest?.status ?? null
 }
 
 /**
@@ -149,17 +228,24 @@ export function changedCivilStatusFields(
 // ---------------------------------------------------------------------------
 
 export type AttestationFacts = {
+  kind: AttestationKind
   /** Niveau courant du compte. */
   loa: Loa
   profileType: string
   /** Cf. `isPivotComplete`. */
   pivotComplete: boolean
+  /** `pivot.nationality` tel qu'enregistré, ou null sans pivot. */
+  nationality: string | null
   /** Suppression du compte demandée ou programmée. */
   closing: boolean
-  /** Statut de la DERNIÈRE demande KYC du compte, s'il en existe une. */
-  latestKycStatus: string | null
+  /** Cf. `lastTerminalKycDecision`. */
+  lastTerminalKyc: "approved" | "rejected" | null
   /** Un signalement de doublon ouvert porte sur ce compte. */
   openDuplicateFlag: boolean
+  /** Dernier changement réel de l'état civil (`userProfile.pivotUpdatedAt`). */
+  pivotUpdatedAt: number | null
+  /** Lecture de l'identité par le partenaire, déclarée dans la requête. */
+  identityReadAt: number
   /** Attestation déjà active pour ce couple (client, sujet, type). */
   activeAttestation: { attestedAt: number } | null
   /** Plafond accordé au client par sa capacité. */
@@ -170,6 +256,7 @@ export type NotEligibleReason =
   | "profile_type"
   | "account_closing"
   | "profile_incomplete"
+  | "nationality"
 export type ReviewRequiredReason = "kyc_rejected" | "duplicate_flag_open"
 
 export type AttestationDecision =
@@ -178,15 +265,18 @@ export type AttestationDecision =
   | { ok: true; outcome: "recorded"; loa: Loa; previousLoa: Loa; raised: false }
   | { ok: false; error: "not_eligible"; reason: NotEligibleReason }
   | { ok: false; error: "review_required"; reason: ReviewRequiredReason }
+  | { ok: false; error: "identity_stale" }
 
 /**
  * Décide l'effet d'une attestation. Ordre :
  *   1. attestation déjà active → rien à faire (idempotence, rejeu réseau) ;
  *   2. éligibilité : citoyen seulement, compte qui ne se ferme pas, profil
- *      complet ;
- *   3. revue humaine : dernière demande KYC refusée (un refus de contrôleur ne
- *      se contourne pas par une attestation), doublon ouvert ;
- *   4. niveau : le Niveau 1 monte au plafond ; un Niveau 2 ou 3 acquis par
+ *      complet, nationalité gabonaise pour une inscription consulaire ;
+ *   3. revue humaine : dernière décision KYC refusée (un refus de contrôleur
+ *      ne se contourne pas par une attestation), doublon ouvert ;
+ *   4. fraîcheur : un état civil modifié après la lecture du partenaire n'a été
+ *      comparé par personne (`identity_stale`) ;
+ *   5. niveau : le Niveau 1 monte au plafond ; un Niveau 2 ou 3 acquis par
  *      une autre voie est seulement tracé, jamais abaissé.
  */
 export function decideAttestation(facts: AttestationFacts): AttestationDecision {
@@ -207,11 +297,20 @@ export function decideAttestation(facts: AttestationFacts): AttestationDecision 
   if (!facts.pivotComplete) {
     return { ok: false, error: "not_eligible", reason: "profile_incomplete" }
   }
-  if (facts.latestKycStatus === "rejected") {
+  if (
+    facts.kind === "consular_registration" &&
+    !isGaboneseNationality(facts.nationality)
+  ) {
+    return { ok: false, error: "not_eligible", reason: "nationality" }
+  }
+  if (facts.lastTerminalKyc === "rejected") {
     return { ok: false, error: "review_required", reason: "kyc_rejected" }
   }
   if (facts.openDuplicateFlag) {
     return { ok: false, error: "review_required", reason: "duplicate_flag_open" }
+  }
+  if (facts.pivotUpdatedAt !== null && facts.identityReadAt < facts.pivotUpdatedAt) {
+    return { ok: false, error: "identity_stale" }
   }
   if (facts.loa < facts.maxLoa) {
     return {

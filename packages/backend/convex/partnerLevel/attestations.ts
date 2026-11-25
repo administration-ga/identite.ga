@@ -7,7 +7,6 @@ import { internalQuery, type MutationCtx } from "../_generated/server"
 import { internalMutation } from "../functions"
 import type { PartnerClientRow } from "../lib/partnerClientAuth"
 import { rateLimiter } from "../rateLimiter"
-import { latestKycRow } from "../verification/requestFlow"
 import {
   ATTESTATION_KINDS,
   acrFor,
@@ -15,6 +14,7 @@ import {
   decideWithdrawal,
   isPivotComplete,
   type AttestationKind,
+  type WithdrawalDecision,
 } from "./rules"
 import {
   activeAttestationsOf,
@@ -23,6 +23,7 @@ import {
   hasApprovedKyc,
   hasOpenDuplicateFlag,
   hasRecordedConsent,
+  lastTerminalKycOf,
 } from "./store"
 
 /**
@@ -34,9 +35,9 @@ import {
  * son compte IDN associé.
  *
  * Partage des rôles : le partenaire ATTESTE un fait, IDN seul DÉCIDE et ÉCRIT
- * `userProfile.loa`. `attest` et `withdraw` sont les seuls écrivains du niveau
- * pour cette voie ; ils passent par les mutations de `../functions` pour que
- * l'agrégat `usersByLoa` suive (cf. l'avertissement de
+ * `userProfile.loa`. `attest`, `withdraw` et `operatorWithdraw` sont les seuls
+ * écrivains du niveau pour cette voie ; ils passent par les mutations de
+ * `../functions` pour que l'agrégat `usersByLoa` suive (cf. l'avertissement de
  * `partner/verifications.ts`). Aucune fausse demande KYC, aucune empreinte
  * faciale : un Niveau 2 attesté se reconnaît en base (table `levelAttestation`)
  * et n'est pas pris pour une preuve documentaire (`verification/documentProof.ts`).
@@ -72,6 +73,7 @@ const UNKNOWN_SUBJECT = v.object({
   ok: v.literal(false),
   error: v.literal("unknown_subject"),
 })
+const NOT_LINKED = v.object({ ok: v.literal(false), error: v.literal("not_linked") })
 
 /** Ce que dit la notification, selon le fait attesté. */
 const FACT_LABEL: Record<AttestationKind, string> = {
@@ -131,13 +133,129 @@ async function recordRefusal(
   })
 }
 
+/** Plafond par client, consommé même par un refus ou un `dryRun`. */
+async function consumeQuota(
+  ctx: MutationCtx,
+  clientId: string,
+): Promise<{ ok: true } | { ok: false; retryAfter: number }> {
+  const limit = await rateLimiter.limit(ctx, "partnerLevelAttest", {
+    key: clientId,
+    throws: false,
+  })
+  return limit.ok ? { ok: true } : { ok: false, retryAfter: limit.retryAfter }
+}
+
+/**
+ * Décide le retrait d'UNE attestation active, sans rien écrire. Partagé par
+ * `withdraw` (partenaire) et `operatorWithdraw` (opérateur) : une seule règle.
+ * `profile` absent (compte sans profil) : rien à faire redescendre.
+ */
+async function planWithdrawal(
+  ctx: MutationCtx,
+  active: Doc<"levelAttestation">,
+  profile: Doc<"userProfile"> | null,
+): Promise<{ decision: WithdrawalDecision; others: Doc<"levelAttestation">[] }> {
+  const others = (await activeAttestationsOf(ctx, active.userId)).filter(
+    (row) => row._id !== active._id,
+  )
+  const decision = decideWithdrawal({
+    attestation: { previousLoa: active.previousLoa, raised: active.raised },
+    loa: profile?.loa ?? active.previousLoa,
+    hasApprovedKyc: await hasApprovedKyc(ctx, active.userId),
+    otherActiveAttestations: others.length,
+  })
+  if (!profile && decision.outcome === "withdrawn") {
+    return { decision: { outcome: "kept", loa: decision.loa, transferRaise: false }, others }
+  }
+  return { decision, others }
+}
+
+/**
+ * Écrit le retrait décidé par `planWithdrawal` : attestation close, charge
+ * transférée à l'attestation active la plus ancienne s'il y a lieu, niveau
+ * ramené, journal, notification de la personne si son niveau baisse.
+ */
+async function applyWithdrawal(
+  ctx: MutationCtx,
+  input: {
+    active: Doc<"levelAttestation">
+    profile: Doc<"userProfile"> | null
+    decision: WithdrawalDecision
+    others: Doc<"levelAttestation">[]
+    clientName: string
+    /** Ajouts au journal (opérateur, par exemple). */
+    auditExtra?: Record<string, string>
+  },
+): Promise<void> {
+  const { active, profile, decision, others } = input
+  if (decision.outcome === "not_attested") return
+  const now = Date.now()
+  await ctx.db.patch(active._id, {
+    status: "withdrawn",
+    withdrawnAt: now,
+    updatedAt: now,
+  })
+
+  let heir: Doc<"levelAttestation"> | undefined
+  if (decision.outcome === "kept" && decision.transferRaise) {
+    // L'attestation active la plus ancienne reprend la charge d'avoir monté
+    // le compte : c'est son retrait qui, plus tard, le fera redescendre.
+    heir = [...others].sort((a, b) => a.attestedAt - b.attestedAt)[0]
+    if (heir) {
+      await ctx.db.patch(heir._id, {
+        raised: true,
+        previousLoa: active.previousLoa,
+        updatedAt: now,
+      })
+    }
+  }
+
+  const lowered =
+    profile !== null && decision.outcome === "withdrawn" && decision.loa !== profile.loa
+  if (lowered) {
+    await ctx.db.patch(profile._id, { loa: decision.loa, updatedAt: now })
+  }
+
+  await ctx.runMutation(internal.audit.recordAudit, {
+    actorId: undefined,
+    action: "level_attestation_withdrawn",
+    targetType: "user",
+    targetId: active.userId,
+    metadata: {
+      clientId: active.clientId,
+      kind: active.kind,
+      outcome: decision.outcome,
+      previousLoa: active.previousLoa,
+      loa: decision.loa,
+      ...(heir ? { raiseTransferredTo: heir.clientId } : {}),
+      ...(input.auditExtra ?? {}),
+    },
+  })
+
+  if (lowered) {
+    await ctx.runMutation(internal.notifications.dispatch, {
+      userId: active.userId,
+      category: "kyc",
+      title: `Votre identité revient au Niveau ${decision.loa}`,
+      body: `${input.clientName} a retiré la confirmation de ${FACT_LABEL[active.kind]}. Votre identité numérique revient au Niveau ${decision.loa}. Vous pouvez faire vérifier votre identité depuis votre espace pour retrouver le Niveau 2.`,
+      metadata: { kind: "level_attestation_withdrawn", clientId: active.clientId },
+      sendEmail: true,
+      pushUrl: "/kyc",
+    })
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Côté partenaire (HTTP, via partnerLevel/http.ts)
 // ---------------------------------------------------------------------------
 
 /** `POST /partner-level/v1/attestations`. */
 export const attest = internalMutation({
-  args: REQUEST_ARGS,
+  args: {
+    ...REQUEST_ARGS,
+    /** Lecture de l'identité par le partenaire (ms), 0 si inconnue. */
+    identityReadAt: v.number(),
+  },
   returns: v.union(
     v.object({
       ok: v.literal(true),
@@ -154,7 +272,7 @@ export const attest = internalMutation({
     NOT_ENABLED,
     RATE_LIMITED,
     UNKNOWN_SUBJECT,
-    v.object({ ok: v.literal(false), error: v.literal("not_linked") }),
+    NOT_LINKED,
     v.object({
       ok: v.literal(false),
       error: v.literal("not_eligible"),
@@ -162,6 +280,7 @@ export const attest = internalMutation({
         v.literal("profile_incomplete"),
         v.literal("profile_type"),
         v.literal("account_closing"),
+        v.literal("nationality"),
       ),
     }),
     v.object({
@@ -169,6 +288,7 @@ export const attest = internalMutation({
       error: v.literal("review_required"),
       reason: v.union(v.literal("kyc_rejected"), v.literal("duplicate_flag_open")),
     }),
+    v.object({ ok: v.literal(false), error: v.literal("identity_stale") }),
   ),
   handler: async (ctx, args) => {
     const grant = await activeGrantOf(ctx, args.clientId, args.kind)
@@ -176,15 +296,12 @@ export const attest = internalMutation({
 
     // Plafond par client, consommé même par un refus ou un `dryRun` : sinon
     // l'API deviendrait un oracle illimité sur les comptes.
-    const limit = await rateLimiter.limit(ctx, "partnerLevelAttest", {
-      key: args.clientId,
-      throws: false,
-    })
-    if (!limit.ok) {
+    const quota = await consumeQuota(ctx, args.clientId)
+    if (!quota.ok) {
       return {
         ok: false as const,
         error: "rate_limited" as const,
-        retryAfter: limit.retryAfter,
+        retryAfter: quota.retryAfter,
       }
     }
 
@@ -203,16 +320,21 @@ export const attest = internalMutation({
     }
 
     const row = await attestationRowOf(ctx, args.clientId, args.kind, userId)
-    const latestKyc = await latestKycRow(ctx, userId)
     const decision = decideAttestation({
+      kind: args.kind,
       loa: profile.loa,
       profileType: profile.profileType,
       pivotComplete: isPivotComplete(profile.pivot),
+      nationality: profile.pivot?.nationality ?? null,
       closing:
         profile.deletionRequestedAt !== undefined ||
         profile.deletionScheduledAt !== undefined,
-      latestKycStatus: latestKyc?.status ?? null,
+      // La dernière DÉCISION, pas la dernière demande : une demande vide
+      // rouverte après un refus ne l'efface pas (revue de sécurité, point A).
+      lastTerminalKyc: await lastTerminalKycOf(ctx, userId),
       openDuplicateFlag: await hasOpenDuplicateFlag(ctx, userId),
+      pivotUpdatedAt: profile.pivotUpdatedAt ?? null,
+      identityReadAt: args.identityReadAt,
       activeAttestation:
         row?.status === "active" ? { attestedAt: row.attestedAt } : null,
       maxLoa: grant.maxLoa,
@@ -223,7 +345,10 @@ export const attest = internalMutation({
       if (decision.error === "not_eligible") {
         return { ok: false as const, error: "not_eligible" as const, reason: decision.reason }
       }
-      return { ok: false as const, error: "review_required" as const, reason: decision.reason }
+      if (decision.error === "review_required") {
+        return { ok: false as const, error: "review_required" as const, reason: decision.reason }
+      }
+      return { ok: false as const, error: "identity_stale" as const }
     }
 
     if (decision.outcome === "already_attested") {
@@ -333,20 +458,18 @@ export const withdraw = internalMutation({
     NOT_ENABLED,
     RATE_LIMITED,
     UNKNOWN_SUBJECT,
+    NOT_LINKED,
   ),
   handler: async (ctx, args) => {
     const grant = await activeGrantOf(ctx, args.clientId, args.kind)
     if (!grant) return { ok: false as const, error: "attestation_not_enabled" as const }
 
-    const limit = await rateLimiter.limit(ctx, "partnerLevelAttest", {
-      key: args.clientId,
-      throws: false,
-    })
-    if (!limit.ok) {
+    const quota = await consumeQuota(ctx, args.clientId)
+    if (!quota.ok) {
       return {
         ok: false as const,
         error: "rate_limited" as const,
-        retryAfter: limit.retryAfter,
+        retryAfter: quota.retryAfter,
       }
     }
 
@@ -357,92 +480,46 @@ export const withdraw = internalMutation({
     }
     const userId = profile.userId
 
-    // Pas d'exigence de consentement au retrait : un citoyen qui a retiré son
-    // consentement ne doit pas figer pour toujours une attestation que le
-    // partenaire veut lever (inscription consulaire close, par exemple).
     const row = await attestationRowOf(ctx, args.clientId, args.kind, userId)
-    const active = row?.status === "active" ? row : null
-    const others = active
-      ? (await activeAttestationsOf(ctx, userId)).filter((r) => r._id !== active._id)
-      : []
-    const decision = decideWithdrawal({
-      attestation: active
-        ? { previousLoa: active.previousLoa, raised: active.raised }
-        : null,
-      loa: profile.loa,
-      hasApprovedKyc: active ? await hasApprovedKyc(ctx, userId) : false,
-      otherActiveAttestations: others.length,
-    })
+    if (!row) {
+      // Jamais rien attesté pour ce sujet : sans consentement, répondre
+      // `not_attested` avec le niveau ferait de la route un oracle sur tout
+      // compte existant (revue de sécurité, point D).
+      if (!(await hasRecordedConsent(ctx, userId, args.clientId))) {
+        await recordRefusal(ctx, args, "withdraw", userId, { error: "not_linked" })
+        return { ok: false as const, error: "not_linked" as const }
+      }
+    }
+    // Une ligne existe (active ou retirée) : pas d'exigence de consentement.
+    // Un citoyen qui a retiré son consentement ne doit pas figer pour toujours
+    // une attestation que le partenaire veut lever.
 
-    if (!active || args.dryRun) {
+    if (row?.status !== "active") {
       return {
         ok: true as const,
-        outcome: decision.outcome,
-        loa: decision.loa,
-        acr: acrFor(decision.loa),
+        outcome: "not_attested" as const,
+        loa: profile.loa,
+        acr: acrFor(profile.loa),
         dryRun: args.dryRun,
       }
     }
 
-    const now = Date.now()
-    await ctx.db.patch(active._id, {
-      status: "withdrawn",
-      withdrawnAt: now,
-      updatedAt: now,
-    })
-
-    let heir: Doc<"levelAttestation"> | undefined
-    if (decision.outcome === "kept" && decision.transferRaise) {
-      // L'attestation active la plus ancienne reprend la charge d'avoir monté
-      // le compte : c'est son retrait qui, plus tard, le fera redescendre.
-      heir = [...others].sort((a, b) => a.attestedAt - b.attestedAt)[0]
-      if (heir) {
-        await ctx.db.patch(heir._id, {
-          raised: true,
-          previousLoa: active.previousLoa,
-          updatedAt: now,
-        })
-      }
-    }
-
-    const lowered = decision.outcome === "withdrawn" && decision.loa !== profile.loa
-    if (lowered) {
-      await ctx.db.patch(profile._id, { loa: decision.loa, updatedAt: now })
-    }
-
-    await ctx.runMutation(internal.audit.recordAudit, {
-      actorId: undefined,
-      action: "level_attestation_withdrawn",
-      targetType: "user",
-      targetId: userId,
-      metadata: {
-        clientId: args.clientId,
-        kind: args.kind,
-        outcome: decision.outcome,
-        previousLoa: active.previousLoa,
-        loa: decision.loa,
-        ...(heir ? { raiseTransferredTo: heir.clientId } : {}),
-      },
-    })
-
-    if (lowered) {
-      await ctx.runMutation(internal.notifications.dispatch, {
-        userId,
-        category: "kyc",
-        title: `Votre identité revient au Niveau ${decision.loa}`,
-        body: `${args.clientName} a retiré la confirmation de ${FACT_LABEL[args.kind]}. Votre identité numérique revient au Niveau ${decision.loa}. Vous pouvez faire vérifier votre identité depuis votre espace pour retrouver le Niveau 2.`,
-        metadata: { kind: "level_attestation_withdrawn", clientId: args.clientId },
-        sendEmail: true,
-        pushUrl: "/kyc",
+    const { decision, others } = await planWithdrawal(ctx, row, profile)
+    if (!args.dryRun) {
+      await applyWithdrawal(ctx, {
+        active: row,
+        profile,
+        decision,
+        others,
+        clientName: args.clientName,
       })
     }
-
     return {
       ok: true as const,
       outcome: decision.outcome,
       loa: decision.loa,
       acr: acrFor(decision.loa),
-      dryRun: false,
+      dryRun: args.dryRun,
     }
   },
 })
@@ -547,8 +624,9 @@ export const grantCapability = internalMutation({
 
 /**
  * Ferme la capacité d'un client. Les attestations déjà enregistrées restent
- * en place (à revoir avec `listAttested`) ; le client ne peut plus ni
- * attester ni retirer. Idempotent, tracé.
+ * en place, avec leur verrou d'état civil ; le client ne peut plus ni attester
+ * ni retirer. Pour les lever, l'opérateur lance `operatorWithdraw` (page par
+ * page), qui marche capacité ouverte ou fermée. Idempotent, tracé.
  */
 export const revokeCapability = internalMutation({
   args: { clientId: v.string(), kind: KIND, revokedBy: v.string() },
@@ -572,6 +650,77 @@ export const revokeCapability = internalMutation({
       },
     })
     return { status: "revoked" as const }
+  },
+})
+
+/**
+ * Retrait par l'opérateur des attestations ACTIVES d'un client, UNE page par
+ * appel (relancer avec `continueCursor` jusqu'à `isDone`). Même règle et mêmes
+ * écritures que le retrait du partenaire (`planWithdrawal`, `applyWithdrawal`) :
+ * on ne redescend que ce que l'attestation avait monté, un compte au Niveau 3
+ * ou aux pièces approuvées garde son niveau. L'opérateur est inscrit au journal.
+ * Marche que la capacité soit encore ouverte ou déjà fermée. Une seconde passe
+ * ne trouve plus rien : les attestations traitées ne sont plus actives.
+ */
+export const operatorWithdraw = internalMutation({
+  args: {
+    clientId: v.string(),
+    kind: KIND,
+    operator: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: v.object({
+    withdrawn: v.number(),
+    kept: v.number(),
+    continueCursor: v.string(),
+    isDone: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const operator = args.operator.trim()
+    if (!operator) {
+      throw new ConvexError({
+        code: "INVALID",
+        message: "Indiquez qui procède au retrait (operator).",
+      })
+    }
+    const app = (await ctx.runQuery(components.betterAuth.adapter.findOne, {
+      model: "oauthApplication",
+      where: [{ field: "clientId", value: args.clientId, operator: "eq" }],
+    })) as PartnerClientRow | null
+    const clientName = app?.name?.trim() || args.clientId
+
+    const page = await ctx.db
+      .query("levelAttestation")
+      .withIndex("by_clientId_and_kind_and_status", (q) =>
+        q.eq("clientId", args.clientId).eq("kind", args.kind).eq("status", "active"),
+      )
+      .paginate(args.paginationOpts)
+
+    let withdrawn = 0
+    let kept = 0
+    for (const active of page.page) {
+      const profile = await ctx.db
+        .query("userProfile")
+        .withIndex("by_userId", (q) => q.eq("userId", active.userId))
+        .unique()
+      const { decision, others } = await planWithdrawal(ctx, active, profile)
+      await applyWithdrawal(ctx, {
+        active,
+        profile,
+        decision,
+        others,
+        clientName,
+        auditExtra: { by: "operator", operator },
+      })
+      if (decision.outcome === "withdrawn") withdrawn++
+      else kept++
+    }
+    return {
+      withdrawn,
+      kept,
+      continueCursor: page.continueCursor,
+      isDone: page.isDone,
+    }
   },
 })
 

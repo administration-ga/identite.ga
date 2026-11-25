@@ -25,11 +25,33 @@ const LOCKED_CIVIL_STATUS_MESSAGE =
 const LOCKED_NIP_MESSAGE =
   "Votre identité a été attestée par votre inscription consulaire : votre NIP ne peut être ni remplacé ni retiré ici. Pour corriger une erreur, adressez-vous à votre consulat ou au support d'identite.ga."
 
+const LOCKED_PROFILE_TYPE_MESSAGE =
+  "Votre identité a été attestée par votre inscription consulaire : votre compte doit rester un compte de citoyen. Pour corriger une erreur, adressez-vous à votre consulat ou au support d'identite.ga."
+
 async function hasActiveAttestation(
   ctx: { db: QueryCtx["db"] },
   userId: string,
 ): Promise<boolean> {
   return (await activeAttestationsOf(ctx, userId)).length > 0
+}
+
+/**
+ * Refuse de quitter le type « citoyen » sous attestation active : l'attestation
+ * ne vaut que pour un compte de citoyen (`not_eligible` / `profile_type`).
+ * Reconfirmer le même type, ou passer à « citoyen », reste permis.
+ */
+export async function assertProfileTypeEditable(
+  ctx: { db: QueryCtx["db"] },
+  userId: string,
+  currentType: string,
+  nextType: string,
+): Promise<void> {
+  if (currentType !== "citizen" || nextType === "citizen") return
+  if (!(await hasActiveAttestation(ctx, userId))) return
+  throw new ConvexError({
+    code: "IDENTITY_LOCKED",
+    message: LOCKED_PROFILE_TYPE_MESSAGE,
+  })
 }
 
 /**

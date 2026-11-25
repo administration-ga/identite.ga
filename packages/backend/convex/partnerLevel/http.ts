@@ -89,6 +89,7 @@ type Failure = {
     | "not_linked"
     | "not_eligible"
     | "review_required"
+    | "identity_stale"
   reason?: string
   retryAfter?: number
 }
@@ -99,6 +100,10 @@ const FAILURES: Record<Failure["error"], [number, string]> = {
   unknown_subject: [404, "Aucun compte ne correspond à ce sujet."],
   not_linked: [409, "Ce citoyen n'a pas donné son consentement à ce service."],
   review_required: [409, "Ce compte demande une revue humaine avant toute attestation."],
+  identity_stale: [
+    409,
+    "L'état civil de ce compte a changé depuis votre dernière lecture : relisez l'identité chez IDN, comparez-la au dossier, puis attestez de nouveau.",
+  ],
   not_eligible: [422, "Ce compte ne remplit pas les conditions de l'attestation."],
 }
 
@@ -107,6 +112,8 @@ const REASON_MESSAGES: Record<string, string> = {
   profile_incomplete:
     "Le profil de ce compte est incomplet : nom, prénom, date de naissance ou nationalité manquant.",
   profile_type: "Seul un compte de citoyen peut recevoir cette attestation.",
+  nationality:
+    "La nationalité enregistrée sur ce compte n'est pas gabonaise : une inscription consulaire ne peut pas être attestée.",
   account_closing: "La suppression de ce compte a été demandée.",
   kyc_rejected:
     "La dernière vérification d'identité de ce compte a été refusée : une revue humaine est nécessaire.",
@@ -147,6 +154,7 @@ const attestHandler = httpAction(async (ctx, request) => {
     sub: parsed.value.sub,
     kind: parsed.value.kind,
     dryRun: parsed.value.dryRun,
+    identityReadAt: parsed.value.identityReadAt,
   })
   if (!result.ok) return failureFrom(result)
   return json(
