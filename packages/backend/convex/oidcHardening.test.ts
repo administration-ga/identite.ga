@@ -244,6 +244,106 @@ describe("inscription dynamique des clients (/oauth2/register)", () => {
   })
 })
 
+/**
+ * Autorisation SANS session : Better Auth renvoie vers la page de connexion
+ * sans regarder ni le client ni l'adresse de retour (oidc-provider/authorize),
+ * et ne les contrôle qu'une fois l'usager connecté. Un lien piégé faisait donc
+ * saisir identifiant et PIN pour finir sur une erreur. Aucun code ne partait
+ * vers l'adresse étrangère, mais l'usager était mis en confiance sur un lien
+ * forgé. Le contrôle a désormais lieu AVANT la connexion.
+ */
+async function authorizeWithoutSession(t: TestClient, params: Record<string, string>) {
+  const { challenge } = await pkcePair()
+  const query = new URLSearchParams({
+    response_type: "code",
+    scope: "openid profile email",
+    state: "etat-avant-connexion",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    ...params,
+  })
+  const res = await t.fetch(`/api/auth/oauth2/authorize?${query}`)
+  const body = (await res.clone().json().catch(() => ({}))) as Record<string, unknown>
+  const target = res.headers.get("location") ?? (typeof body.url === "string" ? body.url : "")
+  return { res, body, target }
+}
+
+describe("adresse de retour contrôlée avant la connexion (/oauth2/authorize)", () => {
+  test("adresse non inscrite : refus immédiat, l'usager n'est pas envoyé se connecter", async () => {
+    const t = makeTestClient()
+    const clientId = await seedClient(t, { loa: 1 })
+    const { res, body, target } = await authorizeWithoutSession(t, {
+      client_id: clientId,
+      redirect_uri: "https://hamecon.example/api/auth/oauth2/callback/idn",
+    })
+    expect(res.status).toBe(400)
+    expect(body.error).toBe("invalid_request")
+    expect(target).not.toContain("sign-in")
+  })
+
+  test("même hôte, autre port : refus (comparaison exacte, comme à l'émission du code)", async () => {
+    const t = makeTestClient()
+    const clientId = await seedClient(t, { loa: 1 })
+    const { res } = await authorizeWithoutSession(t, {
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI.replace("ae.ministere.example", "ae.ministere.example:8443"),
+    })
+    expect(res.status).toBe(400)
+  })
+
+  test("adresse de retour absente : refus", async () => {
+    const t = makeTestClient()
+    const clientId = await seedClient(t, { loa: 1 })
+    const { res, body } = await authorizeWithoutSession(t, { client_id: clientId })
+    expect(res.status).toBe(400)
+    expect(body.error).toBe("invalid_request")
+  })
+
+  test("client inconnu : refus, sans page de connexion", async () => {
+    const t = makeTestClient()
+    const { res, body, target } = await authorizeWithoutSession(t, {
+      client_id: "client_qui_n_existe_pas",
+      redirect_uri: REDIRECT_URI,
+    })
+    expect(res.status).toBe(400)
+    expect(body.error).toBe("invalid_client")
+    expect(target).not.toContain("sign-in")
+  })
+
+  test("client désactivé : refus avant la connexion", async () => {
+    const t = makeTestClient()
+    const clientId = await seedClient(t, { loa: 1 })
+    await t.run(async (ctx) => {
+      await ctx.runMutation(components.betterAuth.adapter.updateOne, {
+        input: {
+          model: "oauthApplication",
+          where: [{ field: "clientId", value: clientId, operator: "eq" }],
+          update: { disabled: true },
+        },
+      })
+    })
+    const { res, body } = await authorizeWithoutSession(t, { client_id: clientId, redirect_uri: REDIRECT_URI })
+    expect(res.status).toBe(400)
+    expect(body.error).toBe("invalid_client")
+  })
+
+  test("adresse inscrite : l'usager est toujours envoyé vers la page de connexion", async () => {
+    const t = makeTestClient()
+    const clientId = await seedClient(t, { loa: 1 })
+    const { res, target } = await authorizeWithoutSession(t, { client_id: clientId, redirect_uri: REDIRECT_URI })
+    expect(res.status).not.toBe(400)
+    expect(target).toContain("/sign-in")
+  })
+
+  test("avec session, le parcours d'un client consenti rend toujours son code", async () => {
+    const t = makeTestClient()
+    const { userId, token } = await seedCitizen(t, 2)
+    const clientId = await seedClient(t, { loa: 1, consentFor: userId })
+    const { code } = await authorize(t, token, clientId)
+    expect(code).toBeTruthy()
+  })
+})
+
 describe("niveau d'assurance contrôlé à l'émission", () => {
   test("client strict : refuse le jeton quand le compte est sous son minimum", async () => {
     const t = makeTestClient()
