@@ -58,7 +58,11 @@ import {
   sandboxAccessDenied,
 } from "./lib/assuranceLevel"
 import {
+  AUTHORIZE_PATH,
+  type AuthorizeClientView,
+  authorizeRequestRefusal,
   DYNAMIC_REGISTRATION_PATH,
+  refuseAuthorizeRequest,
   refuseDynamicRegistration,
 } from "./lib/oidcIssuanceGuards"
 import { readSigningKeys, SIGNING_KEY_PAIR_CONFIG } from "./lib/signingKeys"
@@ -317,6 +321,21 @@ export const createAuth = (
         // comprises. Le portail développeur et l'approbation d'un
         // administrateur sont les seules voies de création d'un client.
         if (ctx.path === DYNAMIC_REGISTRATION_PATH) refuseDynamicRegistration()
+        // Client et adresse de retour contrôlés avant d'envoyer l'usager se
+        // connecter : Better Auth ne le fait qu'après (lib/oidcIssuanceGuards).
+        if (ctx.path === AUTHORIZE_PATH) {
+          const query = (ctx.query ?? {}) as Record<string, unknown>
+          const clientId = typeof query.client_id === "string" ? query.client_id : ""
+          const redirectUri = typeof query.redirect_uri === "string" ? query.redirect_uri : ""
+          const client = clientId
+            ? await ctx.context.adapter.findOne<AuthorizeClientView>({
+                model: "oauthApplication",
+                where: [{ field: "clientId", value: clientId }],
+              })
+            : null
+          const refusal = authorizeRequestRefusal({ clientId, redirectUri }, client)
+          if (refusal) refuseAuthorizeRequest(refusal)
+        }
       }),
       // Gate 2FA générique pour TOUS les endpoints /sign-in/* — deux failles
       // corrigées ici :
