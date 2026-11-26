@@ -1,4 +1,5 @@
 import type { QueryCtx } from "../_generated/server"
+import { documentaryLoa } from "../verification/documentProof"
 import { decideIdentityCollision } from "./identity"
 import type { IdentityCollisionVerdict } from "./identity"
 
@@ -81,7 +82,12 @@ export async function assessIdentityCollision(
       // sont d'ailleurs vidés à l'anonymisation — ce filtre est la ceinture.)
       if (row.deletedAt) continue
       if (args.excludeUserId && row.userId === args.excludeUserId) continue
-      found.push({ userId: row.userId, loa: row.loa, signal, groupKey: key })
+      // Niveau de PREUVE, pas niveau détenu : un Niveau 2 attesté seulement
+      // par un partenaire n'a aucune pièce examinée. S'il fermait la porte,
+      // une attestation suffirait à verrouiller un nom contre son vrai
+      // porteur ; il ouvre donc un dossier, comme un Niveau 1 (ADR 0003).
+      const loa = await documentaryLoa(ctx, row.userId, row.loa)
+      found.push({ userId: row.userId, loa, signal, groupKey: key })
     }
     return found
   }

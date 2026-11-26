@@ -346,6 +346,16 @@ async function purgeUserData(ctx: MutationCtx, userId: string) {
     .withIndex("by_userId", (q) => q.eq("userId", userId))
     .collect();
   for (const r of roles) await ctx.db.delete(r._id);
+
+  /* ---- Attestations de niveau par un partenaire (ADR 0003) ---- */
+  // Le fait attesté (inscription consulaire) est une donnée de la personne :
+  // il part avec le compte. La trace d'audit, elle, reste (5 ans). Une ligne
+  // par partenaire habilité : la borne n'est jamais atteinte en pratique.
+  const attestations = await ctx.db
+    .query("levelAttestation")
+    .withIndex("by_userId", (q) => q.eq("userId", userId))
+    .take(100);
+  for (const a of attestations) await ctx.db.delete(a._id);
 }
 
 async function revokeAllSessions(ctx: MutationCtx, userId: string) {

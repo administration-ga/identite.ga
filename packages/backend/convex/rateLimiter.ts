@@ -3,6 +3,14 @@ import { MINUTE, HOUR, RateLimiter } from "@convex-dev/rate-limiter"
 import { components } from "./_generated/api"
 
 /**
+ * Plafond de l'API d'attestation de niveau (contrat IDN-ATTESTATION-NIVEAU-V1),
+ * par client : attestations et retraits confondus, `dryRun` compris. Assez
+ * large pour une reprise de l'existant (7 200 appels par heure), assez serré
+ * pour qu'un secret fuité ne balaie pas la base. Exporté pour les tests.
+ */
+export const PARTNER_LEVEL_ATTEST_CAPACITY = 120
+
+/**
  * Rate limiter applicatif IDN (§6.6 du cahier).
  * Transactionnel : si la mutation appelante échoue, le quota n'est pas consommé.
  *
@@ -53,6 +61,13 @@ export const rateLimiter = new RateLimiter(components.rateLimiter, {
     kind: "fixed window",
     rate: 10,
     period: 10 * MINUTE,
+  },
+  // Attestation de niveau par un partenaire (partnerLevel/) : par client OAuth.
+  partnerLevelAttest: {
+    kind: "token bucket",
+    rate: PARTNER_LEVEL_ATTEST_CAPACITY,
+    period: MINUTE,
+    capacity: PARTNER_LEVEL_ATTEST_CAPACITY,
   },
   kycSubmit: { kind: "fixed window", rate: 3, period: HOUR },
   contactSubmit: { kind: "fixed window", rate: 5, period: HOUR },

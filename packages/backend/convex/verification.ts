@@ -8,6 +8,7 @@ import {
 } from "./level3/schedulingPolicy"
 import { requireVerifiedAuth } from "./lib/auth"
 import { KYC_DOCUMENT_TYPES } from "./schema"
+import { documentaryLoa } from "./verification/documentProof"
 import {
   activeLevel3Row,
   latestKycRow,
@@ -229,8 +230,10 @@ export const getMine = query({
       ? await ctx.db.get(level3.kycRequestId)
       : await latestKycRow(ctx, me.userId)
 
+    // Niveau de PREUVE, pas niveau détenu : un Niveau 2 attesté seulement doit
+    // d'abord soumettre ses pièces (cf. `verification/documentProof.ts`).
     const ready = isDocumentTrackReadyForBooking(
-      currentLoa,
+      await documentaryLoa(ctx, me.userId, currentLoa),
       kyc ? (kyc.status as DocumentTrackStatus) : null,
     )
     const now = Date.now()

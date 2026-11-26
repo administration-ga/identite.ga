@@ -1,6 +1,7 @@
 import { defineSchema, defineTable } from "convex/server"
 import { v } from "convex/values"
 
+import { ATTESTATION_KINDS } from "./partnerLevel/rules"
 import { WEBHOOK_EVENT_TYPES } from "./webhooks/catalog"
 
 /**
@@ -224,7 +225,18 @@ export const AUDIT_ACTIONS = [
   "jwks_key_rotated",
   "jwks_key_pruned",
   "jwks_key_revoked",
+  // Niveau 2 attesté par un partenaire (contrat IDN-ATTESTATION-NIVEAU-V1,
+  // convex/partnerLevel/, ADR 0003) : attestation enregistrée (niveau relevé
+  // ou simple trace), attestation retirée, attestation refusée avec son motif.
+  // L'ouverture et la fermeture de la capacité d'un client passent par
+  // `admin_action` (métadonnées `kind`).
+  "level_attested",
+  "level_attestation_withdrawn",
+  "level_attestation_refused",
 ] as const
+
+/** Faits qu'un partenaire peut attester (contrat IDN-ATTESTATION-NIVEAU-V1). */
+export const LEVEL_ATTESTATION_KINDS = ATTESTATION_KINDS
 
 export const AUDIT_TARGET_TYPES = [
   "user",
@@ -353,6 +365,20 @@ export default defineSchema({
      * des rapprochements, sans filtre supplémentaire.
      */
     pivotKey: v.optional(v.string()),
+
+    /**
+     * Dernier changement RÉEL de l'état civil : création du pivot, ou
+     * modification du nom, des prénoms, de la date de naissance ou de la
+     * nationalité (`onboarding.completeSignup`, `onboarding.setIdentityPivot`,
+     * `profile.updatePivot`, `delegate/mutations.createDelegatedProfile`).
+     * Pas écrit quand les valeurs sont inchangées.
+     *
+     * Sert l'attestation de niveau (ADR 0003) : un partenaire qui a lu
+     * l'identité AVANT ce moment a comparé son dossier à une copie périmée
+     * (`identity_stale`). Pas de reprise de l'existant : absent veut dire
+     * « inchangé depuis la mise en service de ce champ ».
+     */
+    pivotUpdatedAt: v.optional(v.number()),
 
     /**
      * NIP normalisé (majuscules, sans espaces) — cf. `normalizeNipKey`.
@@ -1745,4 +1771,63 @@ export default defineSchema({
     .index("by_userId", ["userId"])
     .index("by_clientId_and_userId", ["clientId", "userId"])
     .index("by_expiresAt", ["expiresAt"]),
+
+  /**
+   * Capacité d'un client OAuth à attester un fait qui relève le niveau
+   * (contrat IDN-ATTESTATION-NIVEAU-V1, ADR 0003). FERMÉE PAR DÉFAUT : sans
+   * ligne active, le client authentifié reçoit 403 `attestation_not_enabled`.
+   *
+   * Une table plutôt qu'une variable d'environnement ou les `metadata` de
+   * l'application : l'ouverture est un geste d'opérateur tracé
+   * (`partnerLevel.attestations.grantCapability`, audit `admin_action`), et le
+   * portail développeur réécrit `metadata` en entier à chaque modification.
+   *
+   * `maxLoa` borne ce que l'attestation peut accorder : le Niveau 2, jamais le
+   * Niveau 3 (qui exige un entretien et des pièces examinées).
+   */
+  partnerLevelGrant: defineTable({
+    clientId: v.string(),
+    kind: v.union(...LEVEL_ATTESTATION_KINDS.map((k) => v.literal(k))),
+    maxLoa: v.literal(2),
+    grantedAt: v.number(),
+    /** Opérateur qui a ouvert la capacité (libellé libre, tracé à l'audit). */
+    grantedBy: v.string(),
+    revokedAt: v.optional(v.number()),
+  }).index("by_clientId_and_kind", ["clientId", "kind"]),
+
+  /**
+   * Attestation d'un fait par un partenaire, pour un compte (une ligne par
+   * couple client, sujet, type de fait : clé d'idempotence du contrat).
+   * Une nouvelle attestation après un retrait RÉACTIVE la même ligne.
+   *
+   * `previousLoa` est le niveau constaté au moment de l'attestation, et
+   * `raised` dit si l'attestation a elle-même relevé le niveau. Les deux
+   * bornent le retrait : on ne redescend qu'au niveau d'avant, et seulement
+   * si c'est l'attestation qui avait monté le compte.
+   *
+   * Un Niveau 2 « attesté seulement » (`raised` sans demande KYC approuvée)
+   * n'est PAS une preuve documentaire examinée : cf.
+   * `verification/documentProof.ts`. Tant qu'une attestation est active, les
+   * nom, prénoms, date de naissance, nationalité et NIP sont verrouillés
+   * (`partnerLevel/identityLock.ts`).
+   *
+   * Donnée personnelle rattachée au compte : purgée à l'anonymisation
+   * (`privacy/deletion.ts`). Aucune donnée d'état civil ici.
+   */
+  levelAttestation: defineTable({
+    userId: v.string(), // ID Better Auth (sujet OIDC)
+    clientId: v.string(),
+    kind: v.union(...LEVEL_ATTESTATION_KINDS.map((k) => v.literal(k))),
+    status: v.union(v.literal("active"), v.literal("withdrawn")),
+    previousLoa: v.union(v.literal(1), v.literal(2), v.literal(3)),
+    raised: v.boolean(),
+    attestedAt: v.number(),
+    withdrawnAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_clientId_and_kind_and_userId", ["clientId", "kind", "userId"])
+    // Retrait par l'opérateur : parcourir les attestations ACTIVES d'un client.
+    .index("by_clientId_and_kind_and_status", ["clientId", "kind", "status"])
+    .index("by_status_and_attestedAt", ["status", "attestedAt"]),
 })

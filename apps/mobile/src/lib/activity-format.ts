@@ -63,6 +63,9 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   partner_mfa_link_created: "Service autorisé à demander ta confirmation",
   partner_mfa_link_revoked: "Accès d’un service à ta confirmation retiré",
   partner_mfa_request_decided: "Demande de confirmation traitée",
+  level_attested: "Niveau 2 accordé grâce à ton inscription consulaire",
+  level_attestation_withdrawn: "Confirmation de ton inscription consulaire retirée",
+  level_attestation_refused: "Confirmation de ton inscription consulaire non prise en compte",
 };
 
 const SHORT_MONTHS_FR = [

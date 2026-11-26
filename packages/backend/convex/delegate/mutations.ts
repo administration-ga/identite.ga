@@ -64,6 +64,9 @@ export const createDelegatedProfile = internalMutation({
       // l'index au même titre qu'une inscription en propre, sinon elle serait
       // invisible du contrôle anti-doublon.
       ...derivePivotKeys(args.pivot),
+      // Création du pivot : date de référence de l'attestation de niveau
+      // (ADR 0003).
+      pivotUpdatedAt: now,
       createdAt: now,
       updatedAt: now,
     })

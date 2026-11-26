@@ -7,6 +7,7 @@ import { createAuth } from "./auth"
 import { inbound as inboundMailHandler } from "./iboite/mailHttp"
 import { getPublicJwks } from "./lib/documentSigning"
 import { ANDROID_APK_PATH } from "./mobileApp"
+import { registerPartnerLevelRoutes } from "./partnerLevel/http"
 import { registerPartnerMfaRoutes } from "./partnerMfa/http"
 import { parseDirectoryResolveRequest } from "./partner/resolveRequest"
 import {
@@ -1598,5 +1599,7 @@ http.route({
 
 // Confirmation de connexion pour les partenaires (ADR-0007 §6).
 registerPartnerMfaRoutes(http)
+// Niveau 2 attesté par un partenaire (IDN-ATTESTATION-NIVEAU-V1, ADR 0003).
+registerPartnerLevelRoutes(http)
 
 export default http

@@ -14,6 +14,7 @@ import {
   LEVEL3_MIN_BOOKING_NOTICE_MS,
   LEVEL3_REMINDER_LEAD_MS,
 } from "./schedulingPolicy";
+import { documentaryLoa } from "../verification/documentProof";
 import {
   activeLevel3Row,
   latestKycRow,
@@ -97,13 +98,17 @@ async function canBookAppointment(
   userId: string,
   currentLoa: number,
 ): Promise<boolean> {
-  if (currentLoa >= 2) return true;
+  // Niveau de PREUVE : un Niveau 2 attesté seulement par un partenaire n'a
+  // aucune pièce examinée et passe par la piste documentaire comme un
+  // Niveau 1 (cf. `verification/documentProof.ts`, ADR 0003).
+  const proofLoa = await documentaryLoa(ctx, userId, currentLoa);
+  if (proofLoa >= 2) return true;
   const level3 = await activeLevel3Row(ctx, userId);
   const kyc = level3?.kycRequestId
     ? await ctx.db.get(level3.kycRequestId)
     : await latestKycRow(ctx, userId);
   return isDocumentTrackReadyForBooking(
-    currentLoa,
+    proofLoa,
     kyc ? (kyc.status as DocumentTrackStatus) : null,
   );
 }

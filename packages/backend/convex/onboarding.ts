@@ -19,6 +19,12 @@ import {
 } from "./lib/incompleteSignup"
 import { generateIdnId } from "./lib/idnId"
 import { derivePinHash, PIN_REGEX } from "./lib/pin"
+import {
+  assertCivilStatusEditable,
+  assertNipReplaceable,
+  assertProfileTypeEditable,
+} from "./partnerLevel/identityLock"
+import { changedCivilStatusFields } from "./partnerLevel/rules"
 import { PROFILE_TYPES } from "./schema"
 
 /**
@@ -49,6 +55,14 @@ export const selectProfile = mutation({
       .unique()
 
     if (existing) {
+      // Sous attestation active, le compte reste « citoyen » : l'attestation
+      // ne vaut que pour lui. Inerte sans attestation (ADR 0003).
+      await assertProfileTypeEditable(
+        ctx,
+        user.userId,
+        existing.profileType,
+        args.profileType,
+      )
       const now = Date.now()
       await ctx.db.patch(existing._id, {
         profileType: args.profileType,
@@ -120,6 +134,24 @@ export const setIdentityPivot = mutation({
           "Le NIP doit contenir exactement 14 caractères (chiffres ou lettres).",
       })
     }
+    // Ce chemin réécrit tout le pivot d'un profil existant : sans le verrou de
+    // `profile.updatePivot`, il le contournerait. Inerte sans attestation
+    // active (ADR 0003).
+    await assertCivilStatusEditable(ctx, user.userId, profile.pivot, {
+      firstName: args.firstName,
+      lastName: args.lastName,
+      dateOfBirth: args.dateOfBirth,
+      nationality: args.nationality,
+    })
+    await assertNipReplaceable(ctx, user.userId, profile.pivot?.nip, nipTrim)
+    const now = Date.now()
+    const civilStatusChanged =
+      changedCivilStatusFields(profile.pivot, {
+        firstName: args.firstName,
+        lastName: args.lastName,
+        dateOfBirth: args.dateOfBirth,
+        nationality: args.nationality,
+      }).length > 0
     // Même garde qu'à `completeSignup` : ce chemin écrit le pivot lui aussi, et
     // un contrôle posé sur un seul des deux se contournerait par l'autre.
     const { pivotKey, nipKey, phoneKey } = derivePivotKeys({
@@ -165,7 +197,10 @@ export const setIdentityPivot = mutation({
       pivotKey,
       nipKey,
       phoneKey,
-      updatedAt: Date.now(),
+      // Date du dernier changement RÉEL de l'état civil (nom, prénoms, date de
+      // naissance, nationalité), lue par l'attestation de niveau (ADR 0003).
+      ...(civilStatusChanged ? { pivotUpdatedAt: now } : {}),
+      updatedAt: now,
     })
 
     if (collision.matches.length > 0) {
@@ -649,6 +684,8 @@ export const completeSignup = mutation({
       pivotKey,
       ...(nipKey ? { nipKey } : {}),
       phoneKey,
+      // Création du pivot : date de référence de l'attestation de niveau.
+      pivotUpdatedAt: now,
       createdAt: now,
       updatedAt: now,
     })

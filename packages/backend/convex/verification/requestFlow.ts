@@ -5,6 +5,7 @@ import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { rateLimiter } from "../rateLimiter";
 import type { KYC_DOCUMENT_TYPES } from "../schema";
+import { documentaryLoa } from "./documentProof";
 import {
   isKycResumable,
   isLevel3Active,
@@ -12,6 +13,7 @@ import {
   planVerificationRequest,
   type DocumentTrackStatus,
   type TargetLoa,
+  type VerificationRequestPlan,
 } from "./requestPolicy";
 
 /**
@@ -109,12 +111,24 @@ export async function openVerificationRequest(
   const kyc = await latestKycRow(ctx, input.userId);
   const level3 = await activeLevel3Row(ctx, input.userId);
 
-  const plan = planVerificationRequest({
-    targetLoa: input.targetLoa,
-    currentLoa: profile.loa,
-    activeKyc: kyc ? { status: kyc.status as DocumentTrackStatus } : null,
-    hasActiveLevel3: level3 !== null,
-  });
+  // Le niveau DÉTENU décide de « déjà vérifié » ; le niveau de PREUVE
+  // décide de la piste documentaire. Ils ne diffèrent que pour un Niveau 2
+  // attesté seulement par un partenaire, qui passe alors par les pièces comme
+  // un Niveau 1 (cf. `documentProof.ts`, ADR 0003).
+  const proofLoa = await documentaryLoa(ctx, input.userId, profile.loa);
+  // Au journal, le niveau détenu n'apparaît que s'il diffère du niveau de
+  // preuve (Niveau 2 attesté sans pièce examinée).
+  const heldLoaIfDifferent =
+    proofLoa !== profile.loa ? { heldLoa: profile.loa } : {};
+  const plan: VerificationRequestPlan =
+    profile.loa >= input.targetLoa
+      ? { kind: "already_verified" }
+      : planVerificationRequest({
+          targetLoa: input.targetLoa,
+          currentLoa: proofLoa,
+          activeKyc: kyc ? { status: kyc.status as DocumentTrackStatus } : null,
+          hasActiveLevel3: level3 !== null,
+        });
 
   if (plan.kind === "already_verified") {
     throw new ConvexError({
@@ -179,7 +193,7 @@ export async function openVerificationRequest(
         action: "level3_document_track_opened",
         targetType: "kyc",
         targetId: level3!._id,
-        metadata: { kycRequestId, entryLoa: profile.loa },
+        metadata: { kycRequestId, entryLoa: proofLoa, ...heldLoaIfDifferent },
       });
     }
     return {
@@ -189,12 +203,16 @@ export async function openVerificationRequest(
     };
   }
 
+  // `entryLoa` porte le niveau de PREUVE : tout consommateur qui saute l'étape
+  // des pièces quand `entryLoa >= 2` (file partenaire `partner/verifications.ts`,
+  // agenda contrôleur) la garde ainsi pour un Niveau 2 attesté seulement.
+  // Identique au niveau détenu pour tout compte sans attestation.
   const verificationId = await ctx.db.insert("level3Verification", {
     userId: input.userId,
     status: "waiting_controller",
     roomName: "pending",
     kycRequestId,
-    entryLoa: profile.loa,
+    entryLoa: proofLoa,
     requestedAt: now,
     updatedAt: now,
   });
@@ -206,8 +224,9 @@ export async function openVerificationRequest(
     targetId: verificationId,
     metadata: {
       targetLoa: 3,
-      entryLoa: profile.loa,
+      entryLoa: proofLoa,
       method: "video_manual_review",
+      ...heldLoaIfDifferent,
     },
   });
   if (kycRequestId && plan.openDocumentTrack) {
@@ -216,7 +235,7 @@ export async function openVerificationRequest(
       action: "level3_document_track_opened",
       targetType: "kyc",
       targetId: verificationId,
-      metadata: { kycRequestId, entryLoa: profile.loa },
+      metadata: { kycRequestId, entryLoa: proofLoa, ...heldLoaIfDifferent },
     });
   }
   return { targetLoa: input.targetLoa, verificationId, kycRequestId };
